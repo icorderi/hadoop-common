@@ -91,7 +91,7 @@ abstract public class ReplicaInfo extends Block implements Replica {
    * @param vol volume where replica is located
    * @param dir directory path where block and meta files are located
    */
-  ReplicaInfo(long blockId, long len, long genStamp,
+  public ReplicaInfo(long blockId, long len, long genStamp,
       FsVolumeSpi vol, File dir) {
     super(blockId, len, genStamp);
     this.volume = vol;

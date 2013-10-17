@@ -31,7 +31,7 @@ public class ChunkChecksum {
   // can be null if not available
   private final byte[] checksum;
 
-  public ChunkChecksum(long dataLength, byte[] checksum) {
+  ChunkChecksum(long dataLength, byte[] checksum) {
     this.dataLength = dataLength;
     this.checksum = checksum;
   }

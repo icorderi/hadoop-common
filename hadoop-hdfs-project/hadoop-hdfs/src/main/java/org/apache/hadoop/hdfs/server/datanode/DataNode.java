@@ -22,6 +22,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.BlockingService;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -53,6 +54,7 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.JspHelper;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.common.Util;
+import org.apache.hadoop.hdfs.server.datanode.BlockTransferer.Factory;
 import org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter.SecureResources;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
@@ -165,10 +167,11 @@ public class DataNode extends Configured
   }
   
   volatile boolean shouldRun = true;
-  private BlockPoolManager blockPoolManager;
+  BlockPoolManager blockPoolManager;
   volatile FsDatasetSpi<? extends FsVolumeSpi> data = null;
   private String clusterId = null;
-
+  private BlockTransferer.Factory<? extends BlockTransferer> blockTransfererFactory = null;
+  
   public final static String EMPTY_DEL_HINT = "";
   AtomicInteger xmitsInProgress = new AtomicInteger();
   Daemon dataXceiverServer = null;
@@ -206,7 +209,7 @@ public class DataNode extends Configured
   private Configuration conf;
 
   private final List<String> usersWithLocalPathAccess;
-  private boolean connectToDnViaHostname;
+  boolean connectToDnViaHostname;
   ReadaheadPool readaheadPool;
   private final boolean getHdfsBlockLocationsEnabled;
 
@@ -657,6 +660,8 @@ public class DataNode extends Configured
     this.dnConf = new DNConf(conf);
 
     storage = new DataStorage();
+    
+    this.blockTransfererFactory = BlockTransferer.Factory.getFactory(conf);
     
     // global DN settings
     registerMXBean();
@@ -1323,7 +1328,7 @@ public class DataNode extends Configured
       LOG.info(bpReg + " Starting thread to transfer " + 
                block + " to " + xfersBuilder);                       
 
-      new Daemon(new DataTransfer(xferTargets, block,
+      new Daemon(this.blockTransfererFactory.newInstance(this, xferTargets, block,
           BlockConstructionStage.PIPELINE_SETUP_CREATE, "")).start();
     }
   }
@@ -1429,141 +1434,6 @@ public class DataNode extends Configured
     
    ************************************************************************ */
 
-  /**
-   * Used for transferring a block of data.  This class
-   * sends a piece of data to another DataNode.
-   */
-  private class DataTransfer implements Runnable {
-    final DatanodeInfo[] targets;
-    final ExtendedBlock b;
-    final BlockConstructionStage stage;
-    final private DatanodeRegistration bpReg;
-    final String clientname;
-    final CachingStrategy cachingStrategy;
-
-    /**
-     * Connect to the first item in the target list.  Pass along the 
-     * entire target list, the block, and the data.
-     */
-    DataTransfer(DatanodeInfo targets[], ExtendedBlock b, BlockConstructionStage stage,
-        final String clientname) {
-      if (DataTransferProtocol.LOG.isDebugEnabled()) {
-        DataTransferProtocol.LOG.debug(getClass().getSimpleName() + ": "
-            + b + " (numBytes=" + b.getNumBytes() + ")"
-            + ", stage=" + stage
-            + ", clientname=" + clientname
-            + ", targests=" + Arrays.asList(targets));
-      }
-      this.targets = targets;
-      this.b = b;
-      this.stage = stage;
-      BPOfferService bpos = blockPoolManager.get(b.getBlockPoolId());
-      bpReg = bpos.bpRegistration;
-      this.clientname = clientname;
-      this.cachingStrategy =
-          new CachingStrategy(true, getDnConf().readaheadLength);
-    }
-
-    /**
-     * Do the deed, write the bytes
-     */
-    @Override
-    public void run() {
-      xmitsInProgress.getAndIncrement();
-      Socket sock = null;
-      DataOutputStream out = null;
-      DataInputStream in = null;
-      BlockSender blockSender = null;
-      final boolean isClient = clientname.length() > 0;
-      
-      try {
-        final String dnAddr = targets[0].getXferAddr(connectToDnViaHostname);
-        InetSocketAddress curTarget = NetUtils.createSocketAddr(dnAddr);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Connecting to datanode " + dnAddr);
-        }
-        sock = newSocket();
-        NetUtils.connect(sock, curTarget, dnConf.socketTimeout);
-        sock.setSoTimeout(targets.length * dnConf.socketTimeout);
-
-        long writeTimeout = dnConf.socketWriteTimeout + 
-                            HdfsServerConstants.WRITE_TIMEOUT_EXTENSION * (targets.length-1);
-        OutputStream unbufOut = NetUtils.getOutputStream(sock, writeTimeout);
-        InputStream unbufIn = NetUtils.getInputStream(sock);
-        if (dnConf.encryptDataTransfer) {
-          IOStreamPair encryptedStreams =
-              DataTransferEncryptor.getEncryptedStreams(
-                  unbufOut, unbufIn,
-                  blockPoolTokenSecretManager.generateDataEncryptionKey(
-                      b.getBlockPoolId()));
-          unbufOut = encryptedStreams.out;
-          unbufIn = encryptedStreams.in;
-        }
-        
-        out = new DataOutputStream(new BufferedOutputStream(unbufOut,
-            HdfsConstants.SMALL_BUFFER_SIZE));
-        in = new DataInputStream(unbufIn);
-        blockSender = new BlockSender(b, 0, b.getNumBytes(), 
-            false, false, true, DataNode.this, null, cachingStrategy);
-        DatanodeInfo srcNode = new DatanodeInfo(bpReg);
-
-        //
-        // Header info
-        //
-        Token<BlockTokenIdentifier> accessToken = BlockTokenSecretManager.DUMMY_TOKEN;
-        if (isBlockTokenEnabled) {
-          accessToken = blockPoolTokenSecretManager.generateToken(b, 
-              EnumSet.of(BlockTokenSecretManager.AccessMode.WRITE));
-        }
-
-        new Sender(out).writeBlock(b, accessToken, clientname, targets, srcNode,
-            stage, 0, 0, 0, 0, blockSender.getChecksum(), cachingStrategy);
-
-        // send data & checksum
-        blockSender.sendBlock(out, unbufOut, null);
-
-        // no response necessary
-        LOG.info(getClass().getSimpleName() + ": Transmitted " + b
-            + " (numBytes=" + b.getNumBytes() + ") to " + curTarget);
-
-        // read ack
-        if (isClient) {
-          DNTransferAckProto closeAck = DNTransferAckProto.parseFrom(
-              PBHelper.vintPrefixed(in));
-          if (LOG.isDebugEnabled()) {
-            LOG.debug(getClass().getSimpleName() + ": close-ack=" + closeAck);
-          }
-          if (closeAck.getStatus() != Status.SUCCESS) {
-            if (closeAck.getStatus() == Status.ERROR_ACCESS_TOKEN) {
-              throw new InvalidBlockTokenException(
-                  "Got access token error for connect ack, targets="
-                   + Arrays.asList(targets));
-            } else {
-              throw new IOException("Bad connect ack, targets="
-                  + Arrays.asList(targets));
-            }
-          }
-        }
-      } catch (IOException ie) {
-        LOG.warn(bpReg + ":Failed to transfer " + b + " to " +
-            targets[0] + " got ", ie);
-          // check if there are any disk problem
-        try{
-          checkDiskError(ie);
-        } catch(IOException e) {
-            LOG.warn("DataNode.checkDiskError failed in run() with: ", e);
-        }
-        
-      } finally {
-        xmitsInProgress.getAndDecrement();
-        IOUtils.closeStream(blockSender);
-        IOUtils.closeStream(out);
-        IOUtils.closeStream(in);
-        IOUtils.closeSocket(sock);
-      }
-    }
-  }
-  
   /**
    * After a block becomes finalized, a datanode increases metric counter,
    * notifies namenode, and adds it to the block scanner
@@ -2204,7 +2074,7 @@ public class DataNode extends Configured
     b.setNumBytes(visible);
 
     if (targets.length > 0) {
-      new DataTransfer(targets, b, stage, client).run();
+      this.blockTransfererFactory.newInstance(this, targets, b, stage, client).run();
     }
   }
 
