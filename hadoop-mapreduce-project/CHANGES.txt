@@ -191,6 +191,9 @@ Release 2.3.0 - UNRELEASED
     org.apache.hadoop.mapred.lib.db (Aleksey Gorshkov, Andrey Klochkov, and
     Nathan Roberts via jlowe)
 
+    MAPREDUCE-5585. TestCopyCommitter#testNoCommitAction Fails on JDK7
+    (jeagles)
+
 Release 2.2.1 - UNRELEASED
 
   INCOMPATIBLE CHANGES
@@ -1490,6 +1493,9 @@ Release 0.23.10 - UNRELEASED
 
     MAPREDUCE-5513. ConcurrentModificationException in JobControl (Robert
     Parker via jlowe)
+
+    MAPREDUCE-5586. TestCopyMapper#testCopyFailOnBlockSizeDifference fails when
+    run from hadoop-tools/hadoop-distcp directory (jeagles)
 
 Release 0.23.9 - 2013-07-08
 
