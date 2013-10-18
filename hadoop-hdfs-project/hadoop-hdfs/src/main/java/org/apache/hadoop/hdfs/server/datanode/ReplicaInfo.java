@@ -68,7 +68,7 @@ abstract public class ReplicaInfo extends Block implements Replica {
    * @param vol volume where replica is located
    * @param dir directory path where block and meta files are located
    */
-  ReplicaInfo(long blockId, long genStamp, FsVolumeSpi vol, File dir) {
+  public ReplicaInfo(long blockId, long genStamp, FsVolumeSpi vol, File dir) {
     this( blockId, 0L, genStamp, vol, dir);
   }
   
@@ -78,7 +78,7 @@ abstract public class ReplicaInfo extends Block implements Replica {
    * @param vol volume where replica is located
    * @param dir directory path where block and meta files are located
    */
-  ReplicaInfo(Block block, FsVolumeSpi vol, File dir) {
+  public ReplicaInfo(Block block, FsVolumeSpi vol, File dir) {
     this(block.getBlockId(), block.getNumBytes(), 
         block.getGenerationStamp(), vol, dir);
   }
@@ -102,7 +102,7 @@ abstract public class ReplicaInfo extends Block implements Replica {
    * Copy constructor.
    * @param from
    */
-  ReplicaInfo(ReplicaInfo from) {
+  public ReplicaInfo(ReplicaInfo from) {
     this(from, from.getVolume(), from.getDir());
   }
   

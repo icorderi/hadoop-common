@@ -533,7 +533,7 @@ public class DataNode extends Configured
   }
   
   // calls specific to BP
-  protected void notifyNamenodeReceivedBlock(ExtendedBlock block, String delHint) {
+  public void notifyNamenodeReceivedBlock(ExtendedBlock block, String delHint) {
     BPOfferService bpos = blockPoolManager.get(block.getBlockPoolId());
     if(bpos != null) {
       bpos.notifyNamenodeReceivedBlock(block, delHint); 
@@ -544,7 +544,7 @@ public class DataNode extends Configured
   }
   
   // calls specific to BP
-  protected void notifyNamenodeReceivingBlock(ExtendedBlock block) {
+  public void notifyNamenodeReceivingBlock(ExtendedBlock block) {
     BPOfferService bpos = blockPoolManager.get(block.getBlockPoolId());
     if(bpos != null) {
       bpos.notifyNamenodeReceivingBlock(block); 
@@ -1440,7 +1440,7 @@ public class DataNode extends Configured
    * @param block
    * @param delHint
    */
-  void closeBlock(ExtendedBlock block, String delHint) {
+  public void closeBlock(ExtendedBlock block, String delHint) {
     metrics.incrBlocksWritten();
     BPOfferService bpos = blockPoolManager.get(block.getBlockPoolId());
     if(bpos != null) {
@@ -1694,7 +1694,7 @@ public class DataNode extends Configured
    * 
    * @return the fsdataset that stores the blocks
    */
-  FsDatasetSpi<?> getFSDataset() {
+  public FsDatasetSpi<?> getFSDataset() {
     return data;
   }
 
