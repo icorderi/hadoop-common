@@ -38,6 +38,8 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECI
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOGGERS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_TOKEN_TRACKING_ID_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_TOKEN_TRACKING_ID_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_DEFAULT_AUDIT_LOGGER_NAME;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_DELEGATION_KEY_UPDATE_INTERVAL_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_DELEGATION_KEY_UPDATE_INTERVAL_KEY;
@@ -49,6 +51,10 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_RENEW_INTERVAL_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_REQUIRED_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDIT_LOG_AUTOROLL_CHECK_INTERVAL_MS;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDIT_LOG_AUTOROLL_CHECK_INTERVAL_MS_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDIT_LOG_AUTOROLL_MULTIPLIER_THRESHOLD;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDIT_LOG_AUTOROLL_MULTIPLIER_THRESHOLD_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ENABLE_RETRY_CACHE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ENABLE_RETRY_CACHE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_MAX_OBJECTS_DEFAULT;
@@ -121,6 +127,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.DirectoryListingStartAfterNotFoundException;
@@ -144,6 +151,7 @@ import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.PathBasedCacheDirective;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -155,6 +163,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
@@ -379,6 +388,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   FSDirectory dir;
   private final BlockManager blockManager;
   private final SnapshotManager snapshotManager;
+  private final CacheManager cacheManager;
   private final DatanodeStatistics datanodeStatistics;
 
   // Block pool ID used by this namenode
@@ -389,6 +399,16 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   volatile Daemon smmthread = null;  // SafeModeMonitor thread
   
   Daemon nnrmthread = null; // NamenodeResourceMonitor thread
+
+  Daemon nnEditLogRoller = null; // NameNodeEditLogRoller thread
+  /**
+   * When an active namenode will roll its own edit log, in # edits
+   */
+  private final long editLogRollerThreshold;
+  /**
+   * Check interval of an active namenode's edit log roller thread 
+   */
+  private final int editLogRollerInterval;
 
   private volatile boolean hasResourcesAvailable = false;
   private volatile boolean fsRunning = true;
@@ -513,6 +533,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     generationStampV1Limit = GenerationStamp.GRANDFATHER_GENERATION_STAMP;
     leaseManager.removeAllLeases();
     inodeId.setCurrentValue(INodeId.LAST_RESERVED_ID);
+    snapshotManager.clearSnapshottableDirs();
   }
 
   @VisibleForTesting
@@ -702,7 +723,17 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       
       this.standbyShouldCheckpoint = conf.getBoolean(
           DFS_HA_STANDBY_CHECKPOINTS_KEY, DFS_HA_STANDBY_CHECKPOINTS_DEFAULT);
-      
+      // # edit autoroll threshold is a multiple of the checkpoint threshold 
+      this.editLogRollerThreshold = (long)
+          (conf.getFloat(
+              DFS_NAMENODE_EDIT_LOG_AUTOROLL_MULTIPLIER_THRESHOLD,
+              DFS_NAMENODE_EDIT_LOG_AUTOROLL_MULTIPLIER_THRESHOLD_DEFAULT) *
+          conf.getLong(
+              DFS_NAMENODE_CHECKPOINT_TXNS_KEY,
+              DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT));
+      this.editLogRollerInterval = conf.getInt(
+          DFS_NAMENODE_EDIT_LOG_AUTOROLL_CHECK_INTERVAL_MS,
+          DFS_NAMENODE_EDIT_LOG_AUTOROLL_CHECK_INTERVAL_MS_DEFAULT);
       this.inodeId = new INodeId();
       
       // For testing purposes, allow the DT secret manager to be started regardless
@@ -714,6 +745,12 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       this.dtSecretManager = createDelegationTokenSecretManager(conf);
       this.dir = new FSDirectory(fsImage, this, conf);
       this.snapshotManager = new SnapshotManager(dir);
+      writeLock();
+      try {
+        this.cacheManager = new CacheManager(this, conf, blockManager);
+      } finally {
+        writeUnlock();
+      }
       this.safeMode = new SafeModeInfo(conf);
       this.auditLoggers = initAuditLoggers(conf);
       this.isDefaultAuditLogger = auditLoggers.size() == 1 &&
@@ -906,6 +943,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     writeLock();
     try {
       if (blockManager != null) blockManager.close();
+      cacheManager.deactivate();
     } finally {
       writeUnlock();
     }
@@ -937,7 +975,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         blockManager.getDatanodeManager().markAllDatanodesStale();
         blockManager.clearQueues();
         blockManager.processAllPendingDNMessages();
-        
+
         if (!isInSafeMode() ||
             (isInSafeMode() && safeMode.isPopulatingReplQueues())) {
           LOG.info("Reprocessing replication and invalidation queues");
@@ -970,6 +1008,13 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       //ResourceMonitor required only at ActiveNN. See HDFS-2914
       this.nnrmthread = new Daemon(new NameNodeResourceMonitor());
       nnrmthread.start();
+
+      nnEditLogRoller = new Daemon(new NameNodeEditLogRoller(
+          editLogRollerThreshold, editLogRollerInterval));
+      nnEditLogRoller.start();
+
+      cacheManager.activate();
+      blockManager.getDatanodeManager().setSendCachingCommands(true);
     } finally {
       writeUnlock();
       startingActiveService = false;
@@ -1007,6 +1052,10 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         ((NameNodeResourceMonitor) nnrmthread.getRunnable()).stopMonitor();
         nnrmthread.interrupt();
       }
+      if (nnEditLogRoller != null) {
+        ((NameNodeEditLogRoller)nnEditLogRoller.getRunnable()).stop();
+        nnEditLogRoller.interrupt();
+      }
       if (dir != null && dir.fsImage != null) {
         if (dir.fsImage.editLog != null) {
           dir.fsImage.editLog.close();
@@ -1015,6 +1064,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         // so that the tailer starts from the right spot.
         dir.fsImage.updateLastAppliedTxIdFromWritten();
       }
+      cacheManager.deactivate();
+      blockManager.getDatanodeManager().setSendCachingCommands(false);
     } finally {
       writeUnlock();
     }
@@ -1588,8 +1639,14 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
           length = Math.min(length, fileSize - offset);
           isUc = false;
         }
-        return blockManager.createLocatedBlocks(inode.getBlocks(), fileSize,
+        LocatedBlocks blocks =
+          blockManager.createLocatedBlocks(inode.getBlocks(), fileSize,
             isUc, offset, length, needBlockToken, iip.isSnapshot());
+        // Set caching information for the located blocks.
+        for (LocatedBlock lb: blocks.getLocatedBlocks()) {
+          cacheManager.setCachedLocations(lb);
+        }
+        return blocks;
       } finally {
         if (isReadOp) {
           readUnlock();
@@ -2507,8 +2564,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       final INodeFileUnderConstruction pendingFile =
           (INodeFileUnderConstruction) inodes[inodes.length - 1];
 
-      if(onRetryBlock[0] != null) {
-        // This is a retry. Just return the last block.
+      if (onRetryBlock[0] != null && onRetryBlock[0].getLocations().length > 0) {
+        // This is a retry. Just return the last block if having locations.
         return onRetryBlock[0];
       }
       if (pendingFile.getBlocks().length >= maxBlocksPerFile) {
@@ -2545,9 +2602,18 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       final INodeFileUnderConstruction pendingFile =
           (INodeFileUnderConstruction) inodes[inodes.length - 1];
 
-      if(onRetryBlock[0] != null) {
-        // This is a retry. Just return the last block.
-        return onRetryBlock[0];
+      if (onRetryBlock[0] != null) {
+        if (onRetryBlock[0].getLocations().length > 0) {
+          // This is a retry. Just return the last block if having locations.
+          return onRetryBlock[0];
+        } else {
+          // add new chosen targets to already allocated block and return
+          BlockInfo lastBlockInFile = pendingFile.getLastBlock();
+          ((BlockInfoUnderConstruction) lastBlockInFile)
+              .setExpectedLocations(targets);
+          offset = pendingFile.computeFileSize();
+          return makeLocatedBlock(lastBlockInFile, targets, offset);
+        }
       }
 
       // commit the last block and complete it if it has minimum replicas
@@ -4053,15 +4119,15 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
    */
   HeartbeatResponse handleHeartbeat(DatanodeRegistration nodeReg,
       long capacity, long dfsUsed, long remaining, long blockPoolUsed,
-      int xceiverCount, int xmitsInProgress, int failedVolumes) 
-        throws IOException {
+      long cacheCapacity, long cacheUsed, int xceiverCount, int xmitsInProgress,
+      int failedVolumes) throws IOException {
     readLock();
     try {
       final int maxTransfer = blockManager.getMaxReplicationStreams()
           - xmitsInProgress;
       DatanodeCommand[] cmds = blockManager.getDatanodeManager().handleHeartbeat(
           nodeReg, blockPoolId, capacity, dfsUsed, remaining, blockPoolUsed,
-          xceiverCount, maxTransfer, failedVolumes);
+          cacheCapacity, cacheUsed, xceiverCount, maxTransfer, failedVolumes);
       return new HeartbeatResponse(cmds, createHaStatusHeartbeat());
     } finally {
       readUnlock();
@@ -4131,7 +4197,48 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       shouldNNRmRun = false;
     }
  }
-  
+
+  class NameNodeEditLogRoller implements Runnable {
+
+    private boolean shouldRun = true;
+    private final long rollThreshold;
+    private final long sleepIntervalMs;
+
+    public NameNodeEditLogRoller(long rollThreshold, int sleepIntervalMs) {
+        this.rollThreshold = rollThreshold;
+        this.sleepIntervalMs = sleepIntervalMs;
+    }
+
+    @Override
+    public void run() {
+      while (fsRunning && shouldRun) {
+        try {
+          FSEditLog editLog = getFSImage().getEditLog();
+          long numEdits =
+              editLog.getLastWrittenTxId() - editLog.getCurSegmentTxId();
+          if (numEdits > rollThreshold) {
+            FSNamesystem.LOG.info("NameNode rolling its own edit log because"
+                + " number of edits in open segment exceeds threshold of "
+                + rollThreshold);
+            rollEditLog();
+          }
+          Thread.sleep(sleepIntervalMs);
+        } catch (InterruptedException e) {
+          FSNamesystem.LOG.info(NameNodeEditLogRoller.class.getSimpleName()
+              + " was interrupted, exiting");
+          break;
+        } catch (Exception e) {
+          FSNamesystem.LOG.error("Swallowing exception in "
+              + NameNodeEditLogRoller.class.getSimpleName() + ":", e);
+        }
+      }
+    }
+
+    public void stop() {
+      shouldRun = false;
+    }
+  }
+
   public FSImage getFSImage() {
     return dir.fsImage;
   }
@@ -5148,7 +5255,9 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     try {
       checkOperation(OperationCategory.JOURNAL);
       checkNameNodeSafeMode("Log not rolled");
-      LOG.info("Roll Edit Log from " + Server.getRemoteAddress());
+      if (Server.isRpcInvocation()) {
+        LOG.info("Roll Edit Log from " + Server.getRemoteAddress());
+      }
       return getFSImage().rollEditLog();
     } finally {
       writeUnlock();
@@ -6518,6 +6627,10 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   public FSDirectory getFSDirectory() {
     return dir;
   }
+  /** @return the cache manager. */
+  public CacheManager getCacheManager() {
+    return cacheManager;
+  }
 
   @Override  // NameNodeMXBean
   public String getCorruptFiles() {
@@ -6894,6 +7007,254 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     }
   }
 
+  long addPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc = isPermissionEnabled ?
+        getPermissionChecker() : null;
+    CacheEntryWithPayload cacheEntry =
+        RetryCache.waitForCompletion(retryCache, null);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return (Long) cacheEntry.getPayload();
+    }
+    boolean success = false;
+    writeLock();
+    Long result = null;
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add PathBasedCache directive", safeMode);
+      }
+      if (directive.getId() != null) {
+        throw new IOException("addDirective: you cannot specify an ID " +
+            "for this operation.");
+      }
+      PathBasedCacheDirective effectiveDirective = 
+          cacheManager.addDirective(directive, pc);
+      getEditLog().logAddPathBasedCacheDirective(effectiveDirective,
+          cacheEntry != null);
+      result = effectiveDirective.getId();
+      success = true;
+    } finally {
+      writeUnlock();
+      if (success) {
+        getEditLog().logSync();
+      }
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "addPathBasedCacheDirective", null, null, null);
+      }
+      RetryCache.setState(cacheEntry, success, result);
+    }
+    return result;
+  }
+
+  void modifyPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc = isPermissionEnabled ?
+        getPermissionChecker() : null;
+    boolean success = false;
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add PathBasedCache directive", safeMode);
+      }
+      cacheManager.modifyDirective(directive, pc);
+      getEditLog().logModifyPathBasedCacheDirective(directive,
+          cacheEntry != null);
+      success = true;
+    } finally {
+      writeUnlock();
+      if (success) {
+        getEditLog().logSync();
+      }
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "addPathBasedCacheDirective", null, null, null);
+      }
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
+  void removePathBasedCacheDirective(Long id) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc = isPermissionEnabled ?
+        getPermissionChecker() : null;
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot remove PathBasedCache directives", safeMode);
+      }
+      cacheManager.removeDirective(id, pc);
+      getEditLog().logRemovePathBasedCacheDirective(id, cacheEntry != null);
+      success = true;
+    } finally {
+      writeUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "removePathBasedCacheDirective", null, null,
+            null);
+      }
+      RetryCache.setState(cacheEntry, success);
+    }
+    getEditLog().logSync();
+  }
+
+  BatchedListEntries<PathBasedCacheDirective> listPathBasedCacheDirectives(
+      long startId, PathBasedCacheDirective filter) throws IOException {
+    checkOperation(OperationCategory.READ);
+    final FSPermissionChecker pc = isPermissionEnabled ?
+        getPermissionChecker() : null;
+    BatchedListEntries<PathBasedCacheDirective> results;
+    readLock();
+    boolean success = false;
+    try {
+      checkOperation(OperationCategory.READ);
+      results =
+          cacheManager.listPathBasedCacheDirectives(startId, filter, pc);
+      success = true;
+    } finally {
+      readUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "listPathBasedCacheDirectives", null, null,
+            null);
+      }
+    }
+    return results;
+  }
+
+  public void addCachePool(CachePoolInfo req) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc = isPermissionEnabled ?
+        getPermissionChecker() : null;
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return; // Return previous response
+    }
+    writeLock();
+    boolean success = false;
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add cache pool " + req.getPoolName(), safeMode);
+      }
+      if (pc != null) {
+        pc.checkSuperuserPrivilege();
+      }
+      CachePoolInfo info = cacheManager.addCachePool(req);
+      getEditLog().logAddCachePool(info, cacheEntry != null);
+      success = true;
+    } finally {
+      writeUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "addCachePool", req.getPoolName(), null, null);
+      }
+      RetryCache.setState(cacheEntry, success);
+    }
+    
+    getEditLog().logSync();
+  }
+
+  public void modifyCachePool(CachePoolInfo req) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc =
+        isPermissionEnabled ? getPermissionChecker() : null;
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return; // Return previous response
+    }
+    writeLock();
+    boolean success = false;
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot modify cache pool " + req.getPoolName(), safeMode);
+      }
+      if (pc != null) {
+        pc.checkSuperuserPrivilege();
+      }
+      cacheManager.modifyCachePool(req);
+      getEditLog().logModifyCachePool(req, cacheEntry != null);
+      success = true;
+    } finally {
+      writeUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "modifyCachePool", req.getPoolName(), null, null);
+      }
+      RetryCache.setState(cacheEntry, success);
+    }
+
+    getEditLog().logSync();
+  }
+
+  public void removeCachePool(String cachePoolName) throws IOException {
+    checkOperation(OperationCategory.WRITE);
+    final FSPermissionChecker pc =
+        isPermissionEnabled ? getPermissionChecker() : null;
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return; // Return previous response
+    }
+    writeLock();
+    boolean success = false;
+    try {
+      checkOperation(OperationCategory.WRITE);
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot remove cache pool " + cachePoolName, safeMode);
+      }
+      if (pc != null) {
+        pc.checkSuperuserPrivilege();
+      }
+      cacheManager.removeCachePool(cachePoolName);
+      getEditLog().logRemoveCachePool(cachePoolName, cacheEntry != null);
+      success = true;
+    } finally {
+      writeUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "removeCachePool", cachePoolName, null, null);
+      }
+      RetryCache.setState(cacheEntry, success);
+    }
+    
+    getEditLog().logSync();
+  }
+
+  public BatchedListEntries<CachePoolInfo> listCachePools(String prevKey)
+      throws IOException {
+    final FSPermissionChecker pc =
+        isPermissionEnabled ? getPermissionChecker() : null;
+    BatchedListEntries<CachePoolInfo> results;
+    checkOperation(OperationCategory.READ);
+    boolean success = false;
+    readLock();
+    try {
+      checkOperation(OperationCategory.READ);
+      results = cacheManager.listCachePools(pc, prevKey);
+      success = true;
+    } finally {
+      readUnlock();
+      if (isAuditEnabled() && isExternalInvocation()) {
+        logAuditEvent(success, "listCachePools", null, null, null);
+      }
+    }
+    return results;
+  }
+
   /**
    * Default AuditLogger implementation; used when no access logger is
    * defined in the config file. It can also be explicitly listed in the
@@ -6951,10 +7312,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         logAuditMessage(sb.toString());
       }
     }
-
     public void logAuditMessage(String message) {
       auditLog.info(message);
     }
   }
-
 }

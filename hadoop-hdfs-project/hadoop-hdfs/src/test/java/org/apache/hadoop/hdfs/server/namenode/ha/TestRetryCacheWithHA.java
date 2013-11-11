@@ -42,6 +42,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -53,12 +54,14 @@ import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.protocol.PathBasedCacheDirective;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
@@ -147,7 +150,7 @@ public class TestRetryCacheWithHA {
     FSNamesystem fsn0 = cluster.getNamesystem(0);
     LightWeightCache<CacheEntry, CacheEntry> cacheSet = 
         (LightWeightCache<CacheEntry, CacheEntry>) fsn0.getRetryCache().getCacheSet();
-    assertEquals(14, cacheSet.size());
+    assertEquals(20, cacheSet.size());
     
     Map<CacheEntry, CacheEntry> oldEntries = 
         new HashMap<CacheEntry, CacheEntry>();
@@ -168,7 +171,7 @@ public class TestRetryCacheWithHA {
     FSNamesystem fsn1 = cluster.getNamesystem(1);
     cacheSet = (LightWeightCache<CacheEntry, CacheEntry>) fsn1
         .getRetryCache().getCacheSet();
-    assertEquals(14, cacheSet.size());
+    assertEquals(20, cacheSet.size());
     iter = cacheSet.iterator();
     while (iter.hasNext()) {
       CacheEntry entry = iter.next();
@@ -733,6 +736,263 @@ public class TestRetryCacheWithHA {
     }
   }
   
+  /** addPathBasedCacheDirective */
+  class AddPathBasedCacheDirectiveOp extends AtMostOnceOp {
+    private PathBasedCacheDirective directive;
+    private Long result;
+
+    AddPathBasedCacheDirectiveOp(DFSClient client,
+        PathBasedCacheDirective directive) {
+      super("addPathBasedCacheDirective", client);
+      this.directive = directive;
+    }
+
+    @Override
+    void prepare() throws Exception {
+      dfs.addCachePool(new CachePoolInfo(directive.getPool()));
+    }
+
+    @Override
+    void invoke() throws Exception {
+      result = client.addPathBasedCacheDirective(directive);
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<PathBasedCacheDirective> iter =
+            dfs.listPathBasedCacheDirectives(
+                new PathBasedCacheDirective.Builder().
+                    setPool(directive.getPool()).
+                    setPath(directive.getPath()).
+                    build());
+        if (iter.hasNext()) {
+          return true;
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return result;
+    }
+  }
+
+  /** modifyPathBasedCacheDirective */
+  class ModifyPathBasedCacheDirectiveOp extends AtMostOnceOp {
+    private final PathBasedCacheDirective directive;
+    private final short newReplication;
+    private long id;
+
+    ModifyPathBasedCacheDirectiveOp(DFSClient client,
+        PathBasedCacheDirective directive, short newReplication) {
+      super("modifyPathBasedCacheDirective", client);
+      this.directive = directive;
+      this.newReplication = newReplication;
+    }
+
+    @Override
+    void prepare() throws Exception {
+      dfs.addCachePool(new CachePoolInfo(directive.getPool()));
+      id = client.addPathBasedCacheDirective(directive);
+    }
+
+    @Override
+    void invoke() throws Exception {
+      client.modifyPathBasedCacheDirective(
+          new PathBasedCacheDirective.Builder().
+              setId(id).
+              setReplication(newReplication).
+              build());
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<PathBasedCacheDirective> iter =
+            dfs.listPathBasedCacheDirectives(
+                new PathBasedCacheDirective.Builder().
+                    setPool(directive.getPool()).
+                    setPath(directive.getPath()).
+                    build());
+        while (iter.hasNext()) {
+          PathBasedCacheDirective result = iter.next();
+          if ((result.getId() == id) &&
+              (result.getReplication().shortValue() == newReplication)) {
+            return true;
+          }
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return null;
+    }
+  }
+
+  /** removePathBasedCacheDirective */
+  class RemovePathBasedCacheDirectiveOp extends AtMostOnceOp {
+    private PathBasedCacheDirective directive;
+    private long id;
+
+    RemovePathBasedCacheDirectiveOp(DFSClient client, String pool,
+        String path) {
+      super("removePathBasedCacheDirective", client);
+      this.directive = new PathBasedCacheDirective.Builder().
+          setPool(pool).
+          setPath(new Path(path)).
+          build();
+    }
+
+    @Override
+    void prepare() throws Exception {
+      dfs.addCachePool(new CachePoolInfo(directive.getPool()));
+      id = dfs.addPathBasedCacheDirective(directive);
+    }
+
+    @Override
+    void invoke() throws Exception {
+      client.removePathBasedCacheDirective(id);
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<PathBasedCacheDirective> iter =
+            dfs.listPathBasedCacheDirectives(
+                new PathBasedCacheDirective.Builder().
+                  setPool(directive.getPool()).
+                  setPath(directive.getPath()).
+                  build());
+        if (!iter.hasNext()) {
+          return true;
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return null;
+    }
+  }
+
+  /** addCachePool */
+  class AddCachePoolOp extends AtMostOnceOp {
+    private String pool;
+
+    AddCachePoolOp(DFSClient client, String pool) {
+      super("addCachePool", client);
+      this.pool = pool;
+    }
+
+    @Override
+    void prepare() throws Exception {
+    }
+
+    @Override
+    void invoke() throws Exception {
+      client.addCachePool(new CachePoolInfo(pool));
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<CachePoolInfo> iter = dfs.listCachePools();
+        if (iter.hasNext()) {
+          return true;
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return null;
+    }
+  }
+
+  /** modifyCachePool */
+  class ModifyCachePoolOp extends AtMostOnceOp {
+    String pool;
+
+    ModifyCachePoolOp(DFSClient client, String pool) {
+      super("modifyCachePool", client);
+      this.pool = pool;
+    }
+
+    @Override
+    void prepare() throws Exception {
+      client.addCachePool(new CachePoolInfo(pool).setWeight(10));
+    }
+
+    @Override
+    void invoke() throws Exception {
+      client.modifyCachePool(new CachePoolInfo(pool).setWeight(99));
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<CachePoolInfo> iter = dfs.listCachePools();
+        if (iter.hasNext() && iter.next().getWeight() == 99) {
+          return true;
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return null;
+    }
+  }
+
+  /** removeCachePool */
+  class RemoveCachePoolOp extends AtMostOnceOp {
+    private String pool;
+
+    RemoveCachePoolOp(DFSClient client, String pool) {
+      super("removeCachePool", client);
+      this.pool = pool;
+    }
+
+    @Override
+    void prepare() throws Exception {
+      client.addCachePool(new CachePoolInfo(pool));
+    }
+
+    @Override
+    void invoke() throws Exception {
+      client.removeCachePool(pool);
+    }
+
+    @Override
+    boolean checkNamenodeBeforeReturn() throws Exception {
+      for (int i = 0; i < CHECKTIMES; i++) {
+        RemoteIterator<CachePoolInfo> iter = dfs.listCachePools();
+        if (!iter.hasNext()) {
+          return true;
+        }
+        Thread.sleep(1000);
+      }
+      return false;
+    }
+
+    @Override
+    Object getResult() {
+      return null;
+    }
+  }
+
   @Test (timeout=60000)
   public void testCreateSnapshot() throws Exception {
     final DFSClient client = genClientWithDummyHandler();
@@ -810,6 +1070,58 @@ public class TestRetryCacheWithHA {
     testClientRetryWithFailover(op);
   }
   
+  @Test (timeout=60000)
+  public void testAddPathBasedCacheDirective() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new AddPathBasedCacheDirectiveOp(client, 
+        new PathBasedCacheDirective.Builder().
+            setPool("pool").
+            setPath(new Path("/path")).
+            build());
+    testClientRetryWithFailover(op);
+  }
+
+  @Test (timeout=60000)
+  public void testModifyPathBasedCacheDirective() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new ModifyPathBasedCacheDirectiveOp(client, 
+        new PathBasedCacheDirective.Builder().
+            setPool("pool").
+            setPath(new Path("/path")).
+            setReplication((short)1).build(),
+        (short)555);
+    testClientRetryWithFailover(op);
+  }
+
+  @Test (timeout=60000)
+  public void testRemovePathBasedCacheDescriptor() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new RemovePathBasedCacheDirectiveOp(client, "pool",
+        "/path");
+    testClientRetryWithFailover(op);
+  }
+
+  @Test (timeout=60000)
+  public void testAddCachePool() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new AddCachePoolOp(client, "pool");
+    testClientRetryWithFailover(op);
+  }
+
+  @Test (timeout=60000)
+  public void testModifyCachePool() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new ModifyCachePoolOp(client, "pool");
+    testClientRetryWithFailover(op);
+  }
+
+  @Test (timeout=60000)
+  public void testRemoveCachePool() throws Exception {
+    DFSClient client = genClientWithDummyHandler();
+    AtMostOnceOp op = new RemoveCachePoolOp(client, "pool");
+    testClientRetryWithFailover(op);
+  }
+
   /**
    * When NN failover happens, if the client did not receive the response and
    * send a retry request to the other NN, the same response should be recieved

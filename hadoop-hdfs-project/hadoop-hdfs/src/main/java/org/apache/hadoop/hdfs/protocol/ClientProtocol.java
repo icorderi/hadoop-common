@@ -30,6 +30,7 @@ import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -1093,5 +1094,90 @@ public interface ClientProtocol {
   @Idempotent
   public SnapshotDiffReport getSnapshotDiffReport(String snapshotRoot,
       String fromSnapshot, String toSnapshot) throws IOException;
-}
 
+  /**
+   * Add a PathBasedCache entry to the CacheManager.
+   * 
+   * @param directive A PathBasedCacheDirective to be added
+   * @return A PathBasedCacheDirective associated with the added directive
+   * @throws IOException if the directive could not be added
+   */
+  @AtMostOnce
+  public long addPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException;
+
+  /**
+   * Modify a PathBasedCache entry in the CacheManager.
+   * 
+   * @return directive The directive to modify.  Must contain 
+   *                   a directive ID.
+   * @throws IOException if the directive could not be modified
+   */
+  @AtMostOnce
+  public void modifyPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException;
+
+  /**
+   * Remove a PathBasedCacheDirective from the CacheManager.
+   * 
+   * @param id of a PathBasedCacheDirective
+   * @throws IOException if the cache directive could not be removed
+   */
+  @AtMostOnce
+  public void removePathBasedCacheDirective(long id) throws IOException;
+
+  /**
+   * List the set of cached paths of a cache pool. Incrementally fetches results
+   * from the server.
+   * 
+   * @param prevId The last listed entry ID, or -1 if this is the first call to
+   *               listPathBasedCacheDirectives.
+   * @param filter Parameters to use to filter the list results, 
+   *               or null to display all directives visible to us.
+   * @return A RemoteIterator which returns PathBasedCacheDirective objects.
+   */
+  @Idempotent
+  public RemoteIterator<PathBasedCacheDirective> listPathBasedCacheDirectives(
+      long prevId, PathBasedCacheDirective filter) throws IOException;
+
+  /**
+   * Add a new cache pool.
+   * 
+   * @param info Description of the new cache pool
+   * @throws IOException If the request could not be completed.
+   */
+  @AtMostOnce
+  public void addCachePool(CachePoolInfo info) throws IOException;
+
+  /**
+   * Modify an existing cache pool.
+   *
+   * @param req
+   *          The request to modify a cache pool.
+   * @throws IOException 
+   *          If the request could not be completed.
+   */
+  @AtMostOnce
+  public void modifyCachePool(CachePoolInfo req) throws IOException;
+  
+  /**
+   * Remove a cache pool.
+   * 
+   * @param pool name of the cache pool to remove.
+   * @throws IOException if the cache pool did not exist, or could not be
+   *           removed.
+   */
+  @AtMostOnce
+  public void removeCachePool(String pool) throws IOException;
+
+  /**
+   * List the set of cache pools. Incrementally fetches results from the server.
+   * 
+   * @param prevPool name of the last pool listed, or the empty string if this is
+   *          the first invocation of listCachePools
+   * @return A RemoteIterator which returns CachePool objects.
+   */
+  @Idempotent
+  public RemoteIterator<CachePoolInfo> listCachePools(String prevPool)
+      throws IOException;
+}

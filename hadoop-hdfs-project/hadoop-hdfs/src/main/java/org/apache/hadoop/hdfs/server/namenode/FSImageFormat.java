@@ -351,6 +351,8 @@ public class FSImageFormat {
 
         loadSecretManagerState(in);
 
+        loadCacheManagerState(in);
+
         // make sure to read to the end of file
         boolean eof = (in.read() == -1);
         assert eof : "Should have reached the end of image file " + curFile;
@@ -586,8 +588,12 @@ public class FSImageFormat {
     namesystem.dir.cacheName(child);
 
     if (child.isFile()) {
+      updateBlocksMap(child.asFile());
+    }
+  }
+
+    public void updateBlocksMap(INodeFile file) {
       // Add file->block mapping
-      final INodeFile file = child.asFile();
       final BlockInfo[] blocks = file.getBlocks();
       if (blocks != null) {
         final BlockManager bm = namesystem.getBlockManager();
@@ -596,7 +602,6 @@ public class FSImageFormat {
         } 
       }
     }
-  }
 
     /** @return The FSDirectory of the namesystem where the fsimage is loaded */
     public FSDirectory getFSDirectoryInLoading() {
@@ -843,6 +848,14 @@ public class FSImageFormat {
       namesystem.loadSecretManagerState(in);
     }
 
+    private void loadCacheManagerState(DataInput in) throws IOException {
+      int imgVersion = getLayoutVersion();
+      if (!LayoutVersion.supports(Feature.CACHING, imgVersion)) {
+        return;
+      }
+      namesystem.getCacheManager().loadState(in);
+    }
+
     private int getLayoutVersion() {
       return namesystem.getFSImage().getStorage().getLayoutVersion();
     }
@@ -984,6 +997,8 @@ public class FSImageFormat {
         sourceNamesystem.saveFilesUnderConstruction(out);
         context.checkCancelled();
         sourceNamesystem.saveSecretManagerState(out, sdPath);
+        context.checkCancelled();
+        sourceNamesystem.getCacheManager().saveState(out, sdPath);
         context.checkCancelled();
         out.flush();
         context.checkCancelled();

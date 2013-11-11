@@ -57,6 +57,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -66,6 +67,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.HdfsLocatedFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.PathBasedCacheDirective;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.security.token.block.InvalidBlockTokenException;
@@ -79,6 +81,7 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 
 
 /****************************************************************
@@ -1579,5 +1582,132 @@ public class DistributedFileSystem extends FileSystem {
       }
     }.resolve(this, absF);
   }
+
+  /**
+   * Add a new PathBasedCacheDirective.
+   * 
+   * @param directive A directive to add.
+   * @return the ID of the directive that was created.
+   * @throws IOException if the directive could not be added
+   */
+  public long addPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException {
+    Preconditions.checkNotNull(directive.getPath());
+    Path path = new Path(getPathName(fixRelativePart(directive.getPath()))).
+        makeQualified(getUri(), getWorkingDirectory());
+    return dfs.addPathBasedCacheDirective(
+        new PathBasedCacheDirective.Builder(directive).
+            setPath(path).
+            build());
+  }
   
+  public void modifyPathBasedCacheDirective(
+      PathBasedCacheDirective directive) throws IOException {
+    if (directive.getPath() != null) {
+      directive = new PathBasedCacheDirective.Builder(directive).
+          setPath(new Path(getPathName(fixRelativePart(directive.getPath()))).
+              makeQualified(getUri(), getWorkingDirectory())).build();
+    }
+    dfs.modifyPathBasedCacheDirective(directive);
+  }
+
+  /**
+   * Remove a PathBasedCacheDirective.
+   * 
+   * @param id identifier of the PathBasedCacheDirective to remove
+   * @throws IOException if the directive could not be removed
+   */
+  public void removePathBasedCacheDirective(long id)
+      throws IOException {
+    dfs.removePathBasedCacheDirective(id);
+  }
+  
+  /**
+   * List the set of cached paths of a cache pool. Incrementally fetches results
+   * from the server.
+   * 
+   * @param filter Filter parameters to use when listing the directives, null to
+   *               list all directives visible to us.
+   * @return A RemoteIterator which returns PathBasedCacheDirective objects.
+   */
+  public RemoteIterator<PathBasedCacheDirective> listPathBasedCacheDirectives(
+      PathBasedCacheDirective filter) throws IOException {
+    if (filter == null) {
+      filter = new PathBasedCacheDirective.Builder().build();
+    }
+    if (filter.getPath() != null) {
+      filter = new PathBasedCacheDirective.Builder(filter).
+          setPath(new Path(getPathName(fixRelativePart(filter.getPath())))).
+          build();
+    }
+    final RemoteIterator<PathBasedCacheDirective> iter =
+        dfs.listPathBasedCacheDirectives(filter);
+    return new RemoteIterator<PathBasedCacheDirective>() {
+      @Override
+      public boolean hasNext() throws IOException {
+        return iter.hasNext();
+      }
+
+      @Override
+      public PathBasedCacheDirective next() throws IOException {
+        // Although the paths we get back from the NameNode should always be
+        // absolute, we call makeQualified to add the scheme and authority of
+        // this DistributedFilesystem.
+        PathBasedCacheDirective desc = iter.next();
+        Path p = desc.getPath().makeQualified(getUri(), getWorkingDirectory());
+        return new PathBasedCacheDirective.Builder(desc).setPath(p).build();
+      }
+    };
+  }
+
+  /**
+   * Add a cache pool.
+   *
+   * @param info
+   *          The request to add a cache pool.
+   * @throws IOException 
+   *          If the request could not be completed.
+   */
+  public void addCachePool(CachePoolInfo info) throws IOException {
+    CachePoolInfo.validate(info);
+    dfs.addCachePool(info);
+  }
+
+  /**
+   * Modify an existing cache pool.
+   *
+   * @param info
+   *          The request to modify a cache pool.
+   * @throws IOException 
+   *          If the request could not be completed.
+   */
+  public void modifyCachePool(CachePoolInfo info) throws IOException {
+    CachePoolInfo.validate(info);
+    dfs.modifyCachePool(info);
+  }
+    
+  /**
+   * Remove a cache pool.
+   *
+   * @param poolName
+   *          Name of the cache pool to remove.
+   * @throws IOException 
+   *          if the cache pool did not exist, or could not be removed.
+   */
+  public void removeCachePool(String poolName) throws IOException {
+    CachePoolInfo.validateName(poolName);
+    dfs.removeCachePool(poolName);
+  }
+
+  /**
+   * List all cache pools.
+   *
+   * @return A remote iterator from which you can get CachePoolInfo objects.
+   *          Requests will be made as needed.
+   * @throws IOException
+   *          If there was an error listing cache pools.
+   */
+  public RemoteIterator<CachePoolInfo> listCachePools() throws IOException {
+    return dfs.listCachePools();
+  }
 }

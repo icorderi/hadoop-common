@@ -163,6 +163,14 @@ public class MockRM extends ResourceManager {
   public RMApp submitApp(int masterMemory, String name, String user,
       Map<ApplicationAccessType, String> acls, boolean unmanaged, String queue,
       int maxAppAttempts, Credentials ts, String appType) throws Exception {
+    return submitApp(masterMemory, name, user, acls, unmanaged, queue,
+      maxAppAttempts, ts, appType, true);
+  }
+
+  public RMApp submitApp(int masterMemory, String name, String user,
+      Map<ApplicationAccessType, String> acls, boolean unmanaged, String queue,
+      int maxAppAttempts, Credentials ts, String appType,
+      boolean waitForAccepted) throws Exception {
     ApplicationClientProtocol client = getClientRMService();
     GetNewApplicationResponse resp = client.getNewApplication(Records
         .newRecord(GetNewApplicationRequest.class));
@@ -222,7 +230,9 @@ public class MockRM extends ResourceManager {
     }.setClientReq(client, req);
     fakeUser.doAs(action);
     // make sure app is immediately available after submit
-    waitForState(appId, RMAppState.ACCEPTED);
+    if (waitForAccepted) {
+      waitForState(appId, RMAppState.ACCEPTED);
+    }
     return getRMContext().getRMApps().get(appId);
   }
 
@@ -294,6 +304,16 @@ public class MockRM extends ResourceManager {
     am.waitForState(RMAppAttemptState.ALLOCATED);
     getRMContext().getDispatcher().getEventHandler()
         .handle(new RMAppAttemptLaunchFailedEvent(appAttemptId, "Failed"));
+  }
+
+  @Override
+  protected RMHAProtocolService createRMHAProtocolService() {
+    return new RMHAProtocolService(this) {
+      @Override
+      protected void startHAAdminServer() {
+        // do nothing
+      }
+    };
   }
 
   @Override

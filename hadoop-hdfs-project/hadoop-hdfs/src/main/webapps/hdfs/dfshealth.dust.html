@@ -47,7 +47,7 @@
   </div>
 </div>
 
-<a id="browse-dir-first" style="cursor:pointer">Browse the filesystem</a>  <a href="/logs/">NameNode Logs</a>
+<a href="explorer.html">Browse the filesystem</a>  <a href="/logs/">NameNode Logs</a>
 
 <hr/>
 
@@ -56,7 +56,7 @@
   <div class="panel-body">
 
     <p>
-      Security is {#nnstat}{#SecurityModeEnabled}on{:else}off{/SecurityModeEnabled}{/nnstat}.</p>
+      Security is {#nnstat}{#SecurityEnabled}on{:else}off{/SecurityEnabled}{/nnstat}.</p>
     <p>{#nn}{#Safemode}{.}{:else}Safemode is off.{/Safemode}{/nn}</p>
 
     <p>
@@ -88,9 +88,9 @@
       {/nn}
 
       {#fs}
-      <tr><th><a href="dfsnodelist.jsp?whatNodes=LIVE">Live Nodes</a></th><td>{NumLiveDataNodes} (Decommissioned: {NumDecomLiveDataNodes})</td></tr>
-      <tr><th><a href="dfsnodelist.jsp?whatNodes=DEAD">Dead Nodes</a></th><td>{NumDeadDataNodes} (Decommissioned: {NumDecomDeadDataNodes})</td></tr>
-      <tr><th><a href="dfsnodelist.jsp?whatNodes=DECOMMISSIONING">Decommissioning Nodes</a></th><td>{NumDecommissioningDataNodes}</td></tr>
+      <tr><th><a href="#nodelist-operation">Live Nodes</a></th><td>{NumLiveDataNodes} (Decommissioned: {NumDecomLiveDataNodes})</td></tr>
+      <tr><th><a href="#nodelist-operation">Dead Nodes</a></th><td>{NumDeadDataNodes} (Decommissioned: {NumDecomDeadDataNodes})</td></tr>
+      <tr><th><a href="#nodelist-decom">Decommissioning Nodes</a></th><td>{NumDecommissioningDataNodes}</td></tr>
       <tr><th title="Excludes missing blocks.">Number of Under-Replicated Blocks</th><td>{UnderReplicatedBlocks}</td></tr>
       {/fs}
     </table>
@@ -207,7 +207,7 @@
           </thead>
           {#nn.LiveNodes}
           <tr>
-            <td><a class="browse-dir-links" info-http-addr="{infoAddr}" info-https-addr="{infoSecureAddr}">{name}</a> ({xferaddr})</td>
+            <td>{name} ({xferaddr})</td>
             <td>{lastContact}</td>
             <td>{adminState}</td>
             <td>{capacity|fmt_bytes}</td>
@@ -263,4 +263,3 @@
     </div>
   </div>
 </div>
->>>>>>> 801ea4f... Fix for dfshealth

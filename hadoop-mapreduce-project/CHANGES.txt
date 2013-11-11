@@ -171,6 +171,9 @@ Release 2.3.0 - UNRELEASED
     MAPREDUCE-5487. In task processes, JobConf is unnecessarily loaded again
     in Limits (Sandy Ryza)
 
+    MAPREDUCE-5601. ShuffleHandler fadvises file regions as DONTNEED even when
+    fetch fails (Sandy Ryza)
+
   BUG FIXES
 
     MAPREDUCE-5316. job -list-attempt-ids command does not handle illegal
@@ -194,6 +197,10 @@ Release 2.3.0 - UNRELEASED
     MAPREDUCE-5585. TestCopyCommitter#testNoCommitAction Fails on JDK7
     (jeagles)
 
+    MAPREDUCE-5186. mapreduce.job.max.split.locations causes some splits
+    created by CombineFileInputFormat to fail (Robert Parker and Jason Lowe
+    via jlowe)
+
 Release 2.2.1 - UNRELEASED
 
   INCOMPATIBLE CHANGES
@@ -209,7 +216,16 @@ Release 2.2.1 - UNRELEASED
     MAPREDUCE-5463. Deprecate SLOTS_MILLIS counters (Tzuyoshi Ozawa via Sandy
     Ryza)
 
+    MAPREDUCE-5457. Add a KeyOnlyTextOutputReader to enable streaming to write
+    out text files without separators (Sandy Ryza)
+
+    MAPREDUCE-5596. Allow configuring the number of threads used to serve
+    shuffle connections (Sandy Ryza via jlowe)
+
   OPTIMIZATIONS
+
+    MAPREDUCE-4680. Job history cleaner should only check timestamps of files in
+    old enough directories (Robert Kanter via Sandy Ryza)
 
   BUG FIXES
 
@@ -221,6 +237,18 @@ Release 2.2.1 - UNRELEASED
 
     MAPREDUCE-5518. Fixed typo "can't read paritions file". (Albert Chu
     via devaraj)
+
+    MAPREDUCE-5561. org.apache.hadoop.mapreduce.v2.app.job.impl.TestJobImpl
+    testcase failing on trunk (Karthik Kambatla via jlowe)
+
+    MAPREDUCE-5598. TestUserDefinedCounters.testMapReduceJob is flakey
+    (Robert Kanter via jlowe)
+
+    MAPREDUCE-5604. TestMRAMWithNonNormalizedCapabilities fails on Windows due to
+    exceeding max path length. (cnauroth)
+
+    MAPREDUCE-5451. MR uses LD_LIBRARY_PATH which doesn't mean anything in
+    Windows. (Yingda Chen via cnauroth)
 
 Release 2.2.0 - 2013-10-13
 
@@ -1496,6 +1524,8 @@ Release 0.23.10 - UNRELEASED
 
     MAPREDUCE-5586. TestCopyMapper#testCopyFailOnBlockSizeDifference fails when
     run from hadoop-tools/hadoop-distcp directory (jeagles)
+
+    MAPREDUCE-5587. TestTextOutputFormat fails on JDK7 (jeagles)
 
 Release 0.23.9 - 2013-07-08
 

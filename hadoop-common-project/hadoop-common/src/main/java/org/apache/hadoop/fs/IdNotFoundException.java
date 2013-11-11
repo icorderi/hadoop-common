@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,25 +15,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.hadoop.fs;
 
-package org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event;
+import java.io.IOException;
 
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
+/**
+ * Exception corresponding to ID not found - EINVAL
+ */
+public class IdNotFoundException extends IOException {
+  static final long serialVersionUID = 0L;
 
-public class RMAppAttemptStoredEvent extends RMAppAttemptEvent {
-
-  final Exception storedException;
-  
-  public RMAppAttemptStoredEvent(ApplicationAttemptId appAttemptId,
-                                 Exception storedException) {
-    super(appAttemptId, RMAppAttemptEventType.ATTEMPT_SAVED);
-    this.storedException = storedException;
+  public IdNotFoundException(String str) {
+    super(str);
   }
-  
-  public Exception getStoredException() {
-    return storedException;
-  }
-
 }
