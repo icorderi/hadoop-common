@@ -32,11 +32,13 @@ import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffType;
 import org.apache.hadoop.hdfs.server.namenode.Content;
+import org.apache.hadoop.hdfs.server.namenode.ContentSummaryComputationContext;
 import org.apache.hadoop.hdfs.server.namenode.FSImageSerialization;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectoryAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectoryWithQuota;
+import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.INodeMap;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference;
 import org.apache.hadoop.hdfs.server.namenode.Quota;
@@ -74,7 +76,7 @@ public class INodeDirectoryWithSnapshot extends INodeDirectoryWithQuota {
         final INode oldChild, final INode newChild) {
       final List<INode> list = getList(type); 
       final int i = search(list, oldChild.getLocalNameBytes());
-      if (i < 0) {
+      if (i < 0 || list.get(i).getId() != oldChild.getId()) {
         return false;
       }
 
@@ -489,7 +491,7 @@ public class INodeDirectoryWithSnapshot extends INodeDirectoryWithQuota {
 
   INodeDirectoryWithSnapshot(INodeDirectory that, boolean adopt,
       DirectoryDiffList diffs) {
-    super(that, adopt, that.getNsQuota(), that.getDsQuota());
+    super(that, adopt, that.getQuotaCounts());
     this.diffs = diffs != null? diffs: new DirectoryDiffList();
   }
 
@@ -592,10 +594,26 @@ public class INodeDirectoryWithSnapshot extends INodeDirectoryWithQuota {
   }
   
   @Override
+  public void replaceChildFileInSnapshot(final INodeFile oldChild,
+      final INodeFile newChild) {
+    super.replaceChildFileInSnapshot(oldChild, newChild);
+    diffs.replaceChild(ListType.DELETED, oldChild, newChild);
+    diffs.replaceChild(ListType.CREATED, oldChild, newChild);
+  }
+  
+  @Override
   public void replaceChild(final INode oldChild, final INode newChild,
       final INodeMap inodeMap) {
     super.replaceChild(oldChild, newChild, inodeMap);
-    diffs.replaceChild(ListType.CREATED, oldChild, newChild);
+    if (oldChild.getParentReference() != null && !newChild.isReference()) {
+      // oldChild is referred by a Reference node. Thus we are replacing the 
+      // referred inode, e.g., 
+      // INodeFileWithSnapshot -> INodeFileUnderConstructionWithSnapshot
+      // in this case, we do not need to update the diff list
+      return;
+    } else {
+      diffs.replaceChild(ListType.CREATED, oldChild, newChild);
+    }
   }
   
   /**
@@ -875,18 +893,27 @@ public class INodeDirectoryWithSnapshot extends INodeDirectoryWithQuota {
   }
 
   @Override
-  public Content.Counts computeContentSummary(final Content.Counts counts) {
-    super.computeContentSummary(counts);
-    computeContentSummary4Snapshot(counts);
-    return counts;
+  public ContentSummaryComputationContext computeContentSummary(
+      final ContentSummaryComputationContext summary) {
+    // Snapshot summary calc won't be relinquishing locks in the middle.
+    // Do this first and handover to parent.
+    computeContentSummary4Snapshot(summary.getCounts());
+    super.computeContentSummary(summary);
+    return summary;
   }
 
   private void computeContentSummary4Snapshot(final Content.Counts counts) {
+    // Create a new blank summary context for blocking processing of subtree.
+    ContentSummaryComputationContext summary = 
+        new ContentSummaryComputationContext();
     for(DirectoryDiff d : diffs) {
       for(INode deleted : d.getChildrenDiff().getList(ListType.DELETED)) {
-        deleted.computeContentSummary(counts);
+        deleted.computeContentSummary(summary);
       }
     }
+    // Add the counts from deleted trees.
+    counts.add(summary.getCounts());
+    // Add the deleted directory count.
     counts.add(Content.DIRECTORY, diffs.asList().size());
   }
   

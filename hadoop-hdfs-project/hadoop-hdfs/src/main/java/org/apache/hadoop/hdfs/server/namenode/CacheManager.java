@@ -43,16 +43,17 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.IdNotFoundException;
+import org.apache.hadoop.fs.InvalidRequestException;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.protocol.PathBasedCacheDirective;
-import org.apache.hadoop.hdfs.protocol.PathBasedCacheEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CacheDirective;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor;
@@ -100,11 +101,11 @@ public final class CacheManager {
   /**
    * Cache entries, sorted by ID.
    *
-   * listPathBasedCacheDirectives relies on the ordering of elements in this map
+   * listCacheDirectives relies on the ordering of elements in this map
    * to track what has already been listed by the client.
    */
-  private final TreeMap<Long, PathBasedCacheEntry> entriesById =
-      new TreeMap<Long, PathBasedCacheEntry>();
+  private final TreeMap<Long, CacheDirective> entriesById =
+      new TreeMap<Long, CacheDirective>();
 
   /**
    * The entry ID to use for a new entry.  Entry IDs always increase, and are
@@ -115,8 +116,8 @@ public final class CacheManager {
   /**
    * Cache entries, sorted by path
    */
-  private final TreeMap<String, List<PathBasedCacheEntry>> entriesByPath =
-      new TreeMap<String, List<PathBasedCacheEntry>>();
+  private final TreeMap<String, List<CacheDirective>> entriesByPath =
+      new TreeMap<String, List<CacheDirective>>();
 
   /**
    * Cache pools, sorted by name.
@@ -236,93 +237,156 @@ public final class CacheManager {
     return active;
   }
 
-  public TreeMap<Long, PathBasedCacheEntry> getEntriesById() {
-    assert namesystem.hasReadOrWriteLock();
+  public TreeMap<Long, CacheDirective> getEntriesById() {
+    assert namesystem.hasReadLock();
     return entriesById;
   }
   
   @VisibleForTesting
   public GSet<CachedBlock, CachedBlock> getCachedBlocks() {
-    assert namesystem.hasReadOrWriteLock();
+    assert namesystem.hasReadLock();
     return cachedBlocks;
   }
 
   private long getNextEntryId() throws IOException {
     assert namesystem.hasWriteLock();
-    if (nextEntryId == Long.MAX_VALUE) {
-      throw new IOException("No more available IDs");
+    if (nextEntryId >= Long.MAX_VALUE - 1) {
+      throw new IOException("No more available IDs.");
     }
     return nextEntryId++;
   }
 
-  private void addInternal(PathBasedCacheEntry entry) {
+  // Helper getter / validation methods
+
+  private static void checkWritePermission(FSPermissionChecker pc,
+      CachePool pool) throws AccessControlException {
+    if ((pc != null)) {
+      pc.checkPermission(pool, FsAction.WRITE);
+    }
+  }
+
+  private static String validatePoolName(CacheDirectiveInfo directive)
+      throws InvalidRequestException {
+    String pool = directive.getPool();
+    if (pool == null) {
+      throw new InvalidRequestException("No pool specified.");
+    }
+    if (pool.isEmpty()) {
+      throw new InvalidRequestException("Invalid empty pool name.");
+    }
+    return pool;
+  }
+
+  private static String validatePath(CacheDirectiveInfo directive)
+      throws InvalidRequestException {
+    if (directive.getPath() == null) {
+      throw new InvalidRequestException("No path specified.");
+    }
+    String path = directive.getPath().toUri().getPath();
+    if (!DFSUtil.isValidName(path)) {
+      throw new InvalidRequestException("Invalid path '" + path + "'.");
+    }
+    return path;
+  }
+
+  private static short validateReplication(CacheDirectiveInfo directive,
+      short defaultValue) throws InvalidRequestException {
+    short repl = (directive.getReplication() != null)
+        ? directive.getReplication() : defaultValue;
+    if (repl <= 0) {
+      throw new InvalidRequestException("Invalid replication factor " + repl
+          + " <= 0");
+    }
+    return repl;
+  }
+
+  /**
+   * Get a CacheDirective by ID, validating the ID and that the entry
+   * exists.
+   */
+  private CacheDirective getById(long id) throws InvalidRequestException {
+    // Check for invalid IDs.
+    if (id <= 0) {
+      throw new InvalidRequestException("Invalid negative ID.");
+    }
+    // Find the entry.
+    CacheDirective entry = entriesById.get(id);
+    if (entry == null) {
+      throw new InvalidRequestException("No directive with ID " + id
+          + " found.");
+    }
+    return entry;
+  }
+
+  /**
+   * Get a CachePool by name, validating that it exists.
+   */
+  private CachePool getCachePool(String poolName)
+      throws InvalidRequestException {
+    CachePool pool = cachePools.get(poolName);
+    if (pool == null) {
+      throw new InvalidRequestException("Unknown pool " + poolName);
+    }
+    return pool;
+  }
+
+  // RPC handlers
+
+  private void addInternal(CacheDirective entry) {
     entriesById.put(entry.getEntryId(), entry);
     String path = entry.getPath();
-    List<PathBasedCacheEntry> entryList = entriesByPath.get(path);
+    List<CacheDirective> entryList = entriesByPath.get(path);
     if (entryList == null) {
-      entryList = new ArrayList<PathBasedCacheEntry>(1);
+      entryList = new ArrayList<CacheDirective>(1);
       entriesByPath.put(path, entryList);
     }
     entryList.add(entry);
   }
 
-  public PathBasedCacheDirective addDirective(
-      PathBasedCacheDirective directive, FSPermissionChecker pc)
+  public CacheDirectiveInfo addDirective(
+      CacheDirectiveInfo directive, FSPermissionChecker pc)
       throws IOException {
     assert namesystem.hasWriteLock();
-    PathBasedCacheEntry entry;
+    CacheDirective entry;
     try {
-      if (directive.getPool() == null) {
-        throw new IdNotFoundException("addDirective: no pool was specified.");
-      }
-      if (directive.getPool().isEmpty()) {
-        throw new IdNotFoundException("addDirective: pool name was empty.");
-      }
-      CachePool pool = cachePools.get(directive.getPool());
-      if (pool == null) {
-        throw new IdNotFoundException("addDirective: no such pool as " +
-            directive.getPool());
-      }
-      if ((pc != null) && (!pc.checkPermission(pool, FsAction.WRITE))) {
-        throw new AccessControlException("addDirective: write " +
-            "permission denied for pool " + directive.getPool());
-      }
-      if (directive.getPath() == null) {
-        throw new IOException("addDirective: no path was specified.");
-      }
-      String path = directive.getPath().toUri().getPath();
-      if (!DFSUtil.isValidName(path)) {
-        throw new IOException("addDirective: path '" + path + "' is invalid.");
-      }
-      short replication = directive.getReplication() == null ? 
-          (short)1 : directive.getReplication();
-      if (replication <= 0) {
-        throw new IOException("addDirective: replication " + replication +
-            " is invalid.");
-      }
+      CachePool pool = getCachePool(validatePoolName(directive));
+      checkWritePermission(pc, pool);
+      String path = validatePath(directive);
+      short replication = validateReplication(directive, (short)1);
       long id;
       if (directive.getId() != null) {
         // We are loading an entry from the edit log.
         // Use the ID from the edit log.
         id = directive.getId();
+        if (id <= 0) {
+          throw new InvalidRequestException("can't add an ID " +
+              "of " + id + ": it is not positive.");
+        }
+        if (id >= Long.MAX_VALUE) {
+          throw new InvalidRequestException("can't add an ID " +
+              "of " + id + ": it is too big.");
+        }
+        if (nextEntryId <= id) {
+          nextEntryId = id + 1;
+        }
       } else {
         // Add a new entry with the next available ID.
         id = getNextEntryId();
       }
-      entry = new PathBasedCacheEntry(id, path, replication, pool);
+      entry = new CacheDirective(id, path, replication, pool);
       addInternal(entry);
     } catch (IOException e) {
-      LOG.warn("addDirective " + directive + ": failed.", e);
+      LOG.warn("addDirective of " + directive + " failed: ", e);
       throw e;
     }
-    LOG.info("addDirective " + directive + ": succeeded.");
+    LOG.info("addDirective of " + directive + " successful.");
     if (monitor != null) {
       monitor.kick();
     }
     return entry.toDirective();
   }
 
-  public void modifyDirective(PathBasedCacheDirective directive,
+  public void modifyDirective(CacheDirectiveInfo directive,
       FSPermissionChecker pc) throws IOException {
     assert namesystem.hasWriteLock();
     String idString =
@@ -332,75 +396,43 @@ public final class CacheManager {
       // Check for invalid IDs.
       Long id = directive.getId();
       if (id == null) {
-        throw new IdNotFoundException("modifyDirective: " +
-            "no ID to modify was supplied.");
+        throw new InvalidRequestException("Must supply an ID.");
       }
-      if (id <= 0) {
-        throw new IdNotFoundException("modifyDirective " + id +
-            ": invalid non-positive directive ID.");
-      }
-      // Find the entry.
-      PathBasedCacheEntry prevEntry = entriesById.get(id);
-      if (prevEntry == null) {
-        throw new IdNotFoundException("modifyDirective " + id +
-            ": id not found.");
-      }
-      if ((pc != null) &&
-          (!pc.checkPermission(prevEntry.getPool(), FsAction.WRITE))) {
-        throw new AccessControlException("modifyDirective " + id +
-            ": permission denied for initial pool " + prevEntry.getPool());
-      }
+      CacheDirective prevEntry = getById(id);
+      checkWritePermission(pc, prevEntry.getPool());
       String path = prevEntry.getPath();
       if (directive.getPath() != null) {
-        path = directive.getPath().toUri().getPath();
-        if (!DFSUtil.isValidName(path)) {
-          throw new IOException("modifyDirective " + id + ": new path " +
-              path + " is not valid.");
-        }
+        path = validatePath(directive);
       }
-      short replication = (directive.getReplication() != null) ?
-          directive.getReplication() : prevEntry.getReplication();
-      if (replication <= 0) {
-        throw new IOException("modifyDirective: replication " + replication +
-            " is invalid.");
+      short replication = prevEntry.getReplication();
+      if (directive.getReplication() != null) {
+        replication = validateReplication(directive, replication);
       }
       CachePool pool = prevEntry.getPool();
       if (directive.getPool() != null) {
-        pool = cachePools.get(directive.getPool());
-        if (pool == null) {
-          throw new IdNotFoundException("modifyDirective " + id +
-              ": pool " + directive.getPool() + " not found.");
-        }
-        if (directive.getPool().isEmpty()) {
-          throw new IdNotFoundException("modifyDirective: pool name was " +
-              "empty.");
-        }
-        if ((pc != null) &&
-            (!pc.checkPermission(pool, FsAction.WRITE))) {
-          throw new AccessControlException("modifyDirective " + id +
-              ": permission denied for target pool " + pool);
-        }
+        pool = getCachePool(validatePoolName(directive));
+        checkWritePermission(pc, pool);
       }
       removeInternal(prevEntry);
-      PathBasedCacheEntry newEntry =
-          new PathBasedCacheEntry(id, path, replication, pool);
+      CacheDirective newEntry =
+          new CacheDirective(id, path, replication, pool);
       addInternal(newEntry);
     } catch (IOException e) {
-      LOG.warn("modifyDirective " + idString + ": failed.", e);
+      LOG.warn("modifyDirective of " + idString + " failed: ", e);
       throw e;
     }
-    LOG.info("modifyDirective " + idString + ": successfully applied " +
-        directive);
+    LOG.info("modifyDirective of " + idString + " successfully applied " +
+        directive + ".");
   }
 
-  public void removeInternal(PathBasedCacheEntry existing)
-      throws IOException {
+  public void removeInternal(CacheDirective existing)
+      throws InvalidRequestException {
     assert namesystem.hasWriteLock();
     // Remove the corresponding entry in entriesByPath.
     String path = existing.getPath();
-    List<PathBasedCacheEntry> entries = entriesByPath.get(path);
+    List<CacheDirective> entries = entriesByPath.get(path);
     if (entries == null || !entries.remove(existing)) {
-      throw new IdNotFoundException("removeInternal: failed to locate entry " +
+      throw new InvalidRequestException("Failed to locate entry " +
           existing.getEntryId() + " by path " + existing.getPath());
     }
     if (entries.size() == 0) {
@@ -413,81 +445,68 @@ public final class CacheManager {
       throws IOException {
     assert namesystem.hasWriteLock();
     try {
-      // Check for invalid IDs.
-      if (id <= 0) {
-        throw new IdNotFoundException("removeDirective " + id + ": invalid " +
-            "non-positive directive ID.");
-      }
-      // Find the entry.
-      PathBasedCacheEntry existing = entriesById.get(id);
-      if (existing == null) {
-        throw new IdNotFoundException("removeDirective " + id +
-            ": id not found.");
-      }
-      if ((pc != null) &&
-          (!pc.checkPermission(existing.getPool(), FsAction.WRITE))) {
-        throw new AccessControlException("removeDirective " + id +
-            ": write permission denied on pool " +
-            existing.getPool().getPoolName());
-      }
+      CacheDirective existing = getById(id);
+      checkWritePermission(pc, existing.getPool());
       removeInternal(existing);
     } catch (IOException e) {
-      LOG.warn("removeDirective " + id + " failed.", e);
+      LOG.warn("removeDirective of " + id + " failed: ", e);
       throw e;
     }
     if (monitor != null) {
       monitor.kick();
     }
-    LOG.info("removeDirective " + id + ": succeeded.");
+    LOG.info("removeDirective of " + id + " successful.");
   }
 
-  public BatchedListEntries<PathBasedCacheDirective> 
-        listPathBasedCacheDirectives(long prevId,
-            PathBasedCacheDirective filter,
+  public BatchedListEntries<CacheDirectiveEntry> 
+        listCacheDirectives(long prevId,
+            CacheDirectiveInfo filter,
             FSPermissionChecker pc) throws IOException {
-    assert namesystem.hasReadOrWriteLock();
+    assert namesystem.hasReadLock();
     final int NUM_PRE_ALLOCATED_ENTRIES = 16;
     String filterPath = null;
     if (filter.getId() != null) {
-      throw new IOException("we currently don't support filtering by ID");
+      throw new IOException("Filtering by ID is unsupported.");
     }
     if (filter.getPath() != null) {
-      filterPath = filter.getPath().toUri().getPath();
-      if (!DFSUtil.isValidName(filterPath)) {
-        throw new IOException("listPathBasedCacheDirectives: invalid " +
-            "path name '" + filterPath + "'");
-      }
+      filterPath = validatePath(filter);
     }
     if (filter.getReplication() != null) {
-      throw new IOException("we currently don't support filtering " +
-          "by replication");
+      throw new IOException("Filtering by replication is unsupported.");
     }
-    ArrayList<PathBasedCacheDirective> replies =
-        new ArrayList<PathBasedCacheDirective>(NUM_PRE_ALLOCATED_ENTRIES);
+    ArrayList<CacheDirectiveEntry> replies =
+        new ArrayList<CacheDirectiveEntry>(NUM_PRE_ALLOCATED_ENTRIES);
     int numReplies = 0;
-    SortedMap<Long, PathBasedCacheEntry> tailMap =
+    SortedMap<Long, CacheDirective> tailMap =
       entriesById.tailMap(prevId + 1);
-    for (Entry<Long, PathBasedCacheEntry> cur : tailMap.entrySet()) {
+    for (Entry<Long, CacheDirective> cur : tailMap.entrySet()) {
       if (numReplies >= maxListCacheDirectivesNumResponses) {
-        return new BatchedListEntries<PathBasedCacheDirective>(replies, true);
+        return new BatchedListEntries<CacheDirectiveEntry>(replies, true);
       }
-      PathBasedCacheEntry curEntry = cur.getValue();
-      PathBasedCacheDirective directive = cur.getValue().toDirective();
+      CacheDirective curEntry = cur.getValue();
+      CacheDirectiveInfo info = cur.getValue().toDirective();
       if (filter.getPool() != null && 
-          !directive.getPool().equals(filter.getPool())) {
+          !info.getPool().equals(filter.getPool())) {
         continue;
       }
       if (filterPath != null &&
-          !directive.getPath().toUri().getPath().equals(filterPath)) {
+          !info.getPath().toUri().getPath().equals(filterPath)) {
         continue;
       }
-      if ((pc == null) ||
-          (pc.checkPermission(curEntry.getPool(), FsAction.READ))) {
-        replies.add(cur.getValue().toDirective());
+      boolean hasPermission = true;
+      if (pc != null) {
+        try {
+          pc.checkPermission(curEntry.getPool(), FsAction.READ);
+        } catch (AccessControlException e) {
+          hasPermission = false;
+        }
+      }
+      if (hasPermission) {
+        replies.add(new CacheDirectiveEntry(info, cur.getValue().toStats()));
         numReplies++;
       }
     }
-    return new BatchedListEntries<PathBasedCacheDirective>(replies, false);
+    return new BatchedListEntries<CacheDirectiveEntry>(replies, false);
   }
 
   /**
@@ -505,12 +524,13 @@ public final class CacheManager {
     String poolName = info.getPoolName();
     CachePool pool = cachePools.get(poolName);
     if (pool != null) {
-      throw new IOException("cache pool " + poolName + " already exists.");
+      throw new InvalidRequestException("Cache pool " + poolName
+          + " already exists.");
     }
     pool = CachePool.createFromInfoAndDefaults(info);
     cachePools.put(pool.getPoolName(), pool);
-    LOG.info("created new cache pool " + pool);
-    return pool.getInfo(true);
+    LOG.info("Created new cache pool " + pool);
+    return pool.getInfo(null);
   }
 
   /**
@@ -528,7 +548,8 @@ public final class CacheManager {
     String poolName = info.getPoolName();
     CachePool pool = cachePools.get(poolName);
     if (pool == null) {
-      throw new IOException("cache pool " + poolName + " does not exist.");
+      throw new InvalidRequestException("Cache pool " + poolName
+          + " does not exist.");
     }
     StringBuilder bld = new StringBuilder();
     String prefix = "";
@@ -575,16 +596,17 @@ public final class CacheManager {
     CachePoolInfo.validateName(poolName);
     CachePool pool = cachePools.remove(poolName);
     if (pool == null) {
-      throw new IOException("can't remove non-existent cache pool " + poolName);
+      throw new InvalidRequestException(
+          "Cannot remove non-existent cache pool " + poolName);
     }
     
     // Remove entries using this pool
     // TODO: could optimize this somewhat to avoid the need to iterate
     // over all entries in entriesById
-    Iterator<Entry<Long, PathBasedCacheEntry>> iter = 
+    Iterator<Entry<Long, CacheDirective>> iter = 
         entriesById.entrySet().iterator();
     while (iter.hasNext()) {
-      Entry<Long, PathBasedCacheEntry> entry = iter.next();
+      Entry<Long, CacheDirective> entry = iter.next();
       if (entry.getValue().getPool() == pool) {
         entriesByPath.remove(entry.getValue().getPath());
         iter.remove();
@@ -597,7 +619,7 @@ public final class CacheManager {
 
   public BatchedListEntries<CachePoolInfo>
       listCachePools(FSPermissionChecker pc, String prevKey) {
-    assert namesystem.hasReadOrWriteLock();
+    assert namesystem.hasReadLock();
     final int NUM_PRE_ALLOCATED_ENTRIES = 16;
     ArrayList<CachePoolInfo> results = 
         new ArrayList<CachePoolInfo>(NUM_PRE_ALLOCATED_ENTRIES);
@@ -607,11 +629,7 @@ public final class CacheManager {
       if (numListed++ >= maxListCachePoolsResponses) {
         return new BatchedListEntries<CachePoolInfo>(results, true);
       }
-      if (pc == null) {
-        results.add(cur.getValue().getInfo(true));
-      } else {
-        results.add(cur.getValue().getInfo(pc));
-      }
+      results.add(cur.getValue().getInfo(pc));
     }
     return new BatchedListEntries<CachePoolInfo>(results, false);
   }
@@ -755,7 +773,7 @@ public final class CacheManager {
     Counter counter = prog.getCounter(Phase.SAVING_CHECKPOINT, step);
     out.writeInt(cachePools.size());
     for (CachePool pool: cachePools.values()) {
-      pool.getInfo(true).writeTo(out);
+      pool.getInfo(null).writeTo(out);
       counter.increment();
     }
     prog.endStep(Phase.SAVING_CHECKPOINT, step);
@@ -772,7 +790,7 @@ public final class CacheManager {
     prog.setTotal(Phase.SAVING_CHECKPOINT, step, entriesById.size());
     Counter counter = prog.getCounter(Phase.SAVING_CHECKPOINT, step);
     out.writeInt(entriesById.size());
-    for (PathBasedCacheEntry entry: entriesById.values()) {
+    for (CacheDirective entry: entriesById.values()) {
       out.writeLong(entry.getEntryId());
       Text.writeString(out, entry.getPath());
       out.writeShort(entry.getReplication());
@@ -821,15 +839,15 @@ public final class CacheManager {
         throw new IOException("Entry refers to pool " + poolName +
             ", which does not exist.");
       }
-      PathBasedCacheEntry entry =
-          new PathBasedCacheEntry(entryId, path, replication, pool);
+      CacheDirective entry =
+          new CacheDirective(entryId, path, replication, pool);
       if (entriesById.put(entry.getEntryId(), entry) != null) {
         throw new IOException("An entry with ID " + entry.getEntryId() +
             " already exists");
       }
-      List<PathBasedCacheEntry> entries = entriesByPath.get(entry.getPath());
+      List<CacheDirective> entries = entriesByPath.get(entry.getPath());
       if (entries == null) {
-        entries = new LinkedList<PathBasedCacheEntry>();
+        entries = new LinkedList<CacheDirective>();
         entriesByPath.put(entry.getPath(), entries);
       }
       entries.add(entry);

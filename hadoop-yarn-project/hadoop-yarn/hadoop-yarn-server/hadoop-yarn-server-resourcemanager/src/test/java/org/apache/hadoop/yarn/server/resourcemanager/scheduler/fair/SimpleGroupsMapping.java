@@ -15,25 +15,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hdfs;
+
+package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 
-import org.apache.hadoop.conf.Configuration;
-import org.junit.Test;
+import org.apache.hadoop.security.GroupMappingServiceProvider;
 
-public class TestNameNodeHttpServer {
-
-  @Test
-  public void testSslConfiguration() throws IOException {
-    Configuration conf = new Configuration();
-    conf.setBoolean(DFSConfigKeys.DFS_HTTPS_ENABLE_KEY, true);
-    System.setProperty("jetty.ssl.password", "foo");
-    System.setProperty("jetty.ssl.keypassword", "bar");
-
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
-        .build();
-
-    cluster.shutdown();
+public class SimpleGroupsMapping implements GroupMappingServiceProvider {
+  
+  @Override
+  public List<String> getGroups(String user) {
+    return Arrays.asList(user + "group");
   }
+
+  @Override
+  public void cacheGroupsRefresh() throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void cacheGroupsAdd(List<String> groups) throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
 }

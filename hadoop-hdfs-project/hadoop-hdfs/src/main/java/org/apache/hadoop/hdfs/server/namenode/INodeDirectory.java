@@ -204,7 +204,24 @@ public class INodeDirectory extends INodeWithAdditionalFields
     clear();
     return newDir;
   }
-
+  
+  /**
+   * Used when load fileUC from fsimage. The file to be replaced is actually 
+   * only in snapshot, thus may not be contained in the children list. 
+   * See HDFS-5428 for details.
+   */
+  public void replaceChildFileInSnapshot(INodeFile oldChild,
+      final INodeFile newChild) {
+    if (children != null) {
+      final int i = searchChildren(newChild.getLocalNameBytes());
+      if (i >= 0 && children.get(i).getId() == oldChild.getId()) {
+        // no need to consider reference node here, since we already do the 
+        // replacement in FSImageFormat.Loader#loadFilesUnderConstruction
+        children.set(i, newChild);
+      }
+    }
+  }
+  
   /** Replace the given child with a new child. */
   public void replaceChild(INode oldChild, final INode newChild,
       final INodeMap inodeMap) {
@@ -466,12 +483,45 @@ public class INodeDirectory extends INodeWithAdditionalFields
   }
 
   @Override
-  public Content.Counts computeContentSummary(final Content.Counts counts) {
-    for (INode child : getChildrenList(null)) {
-      child.computeContentSummary(counts);
+  public ContentSummaryComputationContext computeContentSummary(
+      ContentSummaryComputationContext summary) {
+    ReadOnlyList<INode> childrenList = getChildrenList(null);
+    // Explicit traversing is done to enable repositioning after relinquishing
+    // and reacquiring locks.
+    for (int i = 0;  i < childrenList.size(); i++) {
+      INode child = childrenList.get(i);
+      byte[] childName = child.getLocalNameBytes();
+
+      long lastYieldCount = summary.getYieldCount();
+      child.computeContentSummary(summary);
+
+      // Check whether the computation was paused in the subtree.
+      // The counts may be off, but traversing the rest of children
+      // should be made safe.
+      if (lastYieldCount == summary.getYieldCount()) {
+        continue;
+      }
+
+      // The locks were released and reacquired. Check parent first.
+      if (getParent() == null) {
+        // Stop further counting and return whatever we have so far.
+        break;
+      }
+
+      // Obtain the children list again since it may have been modified.
+      childrenList = getChildrenList(null);
+      // Reposition in case the children list is changed. Decrement by 1
+      // since it will be incremented when loops.
+      i = nextChild(childrenList, childName) - 1;
     }
-    counts.add(Content.DIRECTORY, 1);
-    return counts;
+
+    // Increment the directory count for this directory.
+    summary.getCounts().add(Content.DIRECTORY, 1);
+
+    // Relinquish and reacquire locks if necessary.
+    summary.yield();
+
+    return summary;
   }
 
   /**
@@ -562,8 +612,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
   @Override
   public boolean metadataEquals(INodeDirectoryAttributes other) {
     return other != null
-        && getNsQuota() == other.getNsQuota()
-        && getDsQuota() == other.getDsQuota()
+        && getQuotaCounts().equals(other.getQuotaCounts())
         && getPermissionLong() == other.getPermissionLong();
   }
   

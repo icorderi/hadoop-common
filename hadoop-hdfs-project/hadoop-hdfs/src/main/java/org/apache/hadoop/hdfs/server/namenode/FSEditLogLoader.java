@@ -30,20 +30,19 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.protocol.PathBasedCacheDirective;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCachePoolOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCloseOp;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddPathBasedCacheDirectiveOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllocateBlockIdOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllowSnapshotOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.BlockListUpdatingOp;
@@ -57,10 +56,10 @@ import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DisallowSnapshotOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.GetDelegationTokenOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.MkdirOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCachePoolOp;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyPathBasedCacheDirectiveOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ReassignLeaseOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCachePoolOp;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemovePathBasedCacheDirectiveOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOldOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameSnapshotOp;
@@ -84,7 +83,6 @@ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress.Co
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Step;
 import org.apache.hadoop.hdfs.util.ChunkedArrayList;
 import org.apache.hadoop.hdfs.util.Holder;
-import org.apache.jasper.tagplugins.jstl.core.Remove;
 
 import com.google.common.base.Joiner;
 
@@ -595,7 +593,7 @@ public class FSEditLogLoader {
       fsNamesys.getSnapshotManager().deleteSnapshot(
           deleteSnapshotOp.snapshotRoot, deleteSnapshotOp.snapshotName,
           collectedBlocks, removedINodes);
-      fsNamesys.removeBlocks(collectedBlocks);
+      fsNamesys.removeBlocksAndUpdateSafemodeTotal(collectedBlocks);
       collectedBlocks.clear();
       fsNamesys.dir.removeFromInodeMap(removedINodes);
       removedINodes.clear();
@@ -641,8 +639,8 @@ public class FSEditLogLoader {
       break;
     }
     case OP_ADD_PATH_BASED_CACHE_DIRECTIVE: {
-      AddPathBasedCacheDirectiveOp addOp = (AddPathBasedCacheDirectiveOp) op;
-      PathBasedCacheDirective result = fsNamesys.
+      AddCacheDirectiveInfoOp addOp = (AddCacheDirectiveInfoOp) op;
+      CacheDirectiveInfo result = fsNamesys.
           getCacheManager().addDirective(addOp.directive, null);
       if (toAddRetryCache) {
         Long id = result.getId();
@@ -651,8 +649,8 @@ public class FSEditLogLoader {
       break;
     }
     case OP_MODIFY_PATH_BASED_CACHE_DIRECTIVE: {
-      ModifyPathBasedCacheDirectiveOp modifyOp =
-          (ModifyPathBasedCacheDirectiveOp) op;
+      ModifyCacheDirectiveInfoOp modifyOp =
+          (ModifyCacheDirectiveInfoOp) op;
       fsNamesys.getCacheManager().modifyDirective(
           modifyOp.directive, null);
       if (toAddRetryCache) {
@@ -661,8 +659,8 @@ public class FSEditLogLoader {
       break;
     }
     case OP_REMOVE_PATH_BASED_CACHE_DIRECTIVE: {
-      RemovePathBasedCacheDirectiveOp removeOp =
-          (RemovePathBasedCacheDirectiveOp) op;
+      RemoveCacheDirectiveInfoOp removeOp =
+          (RemoveCacheDirectiveInfoOp) op;
       fsNamesys.getCacheManager().removeDirective(removeOp.id, null);
       if (toAddRetryCache) {
         fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);

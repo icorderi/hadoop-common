@@ -278,8 +278,9 @@ public abstract class INodeReference extends INode {
   }
 
   @Override
-  public Content.Counts computeContentSummary(Content.Counts counts) {
-    return referred.computeContentSummary(counts);
+  public ContentSummaryComputationContext computeContentSummary(
+      ContentSummaryComputationContext summary) {
+    return referred.computeContentSummary(summary);
   }
 
   @Override
@@ -294,15 +295,10 @@ public abstract class INodeReference extends INode {
   }
 
   @Override
-  public final long getNsQuota() {
-    return referred.getNsQuota();
+  public Quota.Counts getQuotaCounts() {
+    return referred.getQuotaCounts();
   }
 
-  @Override
-  public final long getDsQuota() {
-    return referred.getDsQuota();
-  }
-  
   @Override
   public final void clear() {
     super.clear();
@@ -444,12 +440,13 @@ public abstract class INodeReference extends INode {
     }
     
     @Override
-    public final Content.Counts computeContentSummary(Content.Counts counts) {
+    public final ContentSummaryComputationContext computeContentSummary(
+        ContentSummaryComputationContext summary) {
       //only count diskspace for WithName
       final Quota.Counts q = Quota.Counts.newInstance();
       computeQuotaUsage(q, false, lastSnapshotId);
-      counts.add(Content.DISKSPACE, q.get(Quota.DISKSPACE));
-      return counts;
+      summary.getCounts().add(Content.DISKSPACE, q.get(Quota.DISKSPACE));
+      return summary;
     }
 
     @Override

@@ -107,7 +107,7 @@ public class MockRM extends ResourceManager {
       throws Exception {
     RMApp app = getRMContext().getRMApps().get(attemptId.getApplicationId());
     Assert.assertNotNull("app shouldn't be null", app);
-    RMAppAttempt attempt = app.getCurrentAppAttempt();
+    RMAppAttempt attempt = app.getRMAppAttempt(attemptId);
     int timeoutSecs = 0;
     while (!finalState.equals(attempt.getAppAttemptState()) && timeoutSecs++ < 40) {
       System.out.println("AppAttempt : " + attemptId 
@@ -419,6 +419,10 @@ public class MockRM extends ResourceManager {
 
   public ClientToAMTokenSecretManagerInRM getClientToAMTokenSecretManager() {
     return this.clientToAMSecretManager;
+  }
+
+  public RMAppManager getRMAppManager() {
+    return this.rmAppManager;
   }
 
   @Override

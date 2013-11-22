@@ -15,17 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.fs;
+package org.apache.hadoop.yarn.server.resourcemanager.recovery;
 
-import java.io.IOException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 
-/**
- * Exception corresponding to ID not found - EINVAL
- */
-public class IdNotFoundException extends IOException {
-  static final long serialVersionUID = 0L;
+public class StoreFencedException extends YarnException {
+  private static final long serialVersionUID = 1L;
 
-  public IdNotFoundException(String str) {
-    super(str);
+  public StoreFencedException() {
+    super("RMStateStore has been fenced");
   }
 }
