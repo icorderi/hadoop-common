@@ -17,9 +17,6 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import java.util.Map;
-import java.util.HashMap;
-
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
@@ -30,7 +27,6 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceStability.Unstable
 public enum FSEditLogOpCodes {
   // last op code in file
-  OP_INVALID                    ((byte) -1),
   OP_ADD                        ((byte)  0),
   OP_RENAME_OLD                 ((byte)  1), // deprecated operation
   OP_DELETE                     ((byte)  2),
@@ -64,14 +60,18 @@ public enum FSEditLogOpCodes {
   OP_DISALLOW_SNAPSHOT          ((byte) 30),
   OP_SET_GENSTAMP_V2            ((byte) 31),
   OP_ALLOCATE_BLOCK_ID          ((byte) 32),
-  OP_ADD_PATH_BASED_CACHE_DIRECTIVE       ((byte) 33),
-  OP_REMOVE_PATH_BASED_CACHE_DIRECTIVE    ((byte) 34),
-  OP_ADD_CACHE_POOL                       ((byte) 35),
-  OP_MODIFY_CACHE_POOL                    ((byte) 36),
-  OP_REMOVE_CACHE_POOL                    ((byte) 37),
-  OP_MODIFY_PATH_BASED_CACHE_DIRECTIVE    ((byte) 38);
+  OP_ADD_BLOCK                  ((byte) 33),
+  OP_ADD_CACHE_DIRECTIVE       ((byte) 34),
+  OP_REMOVE_CACHE_DIRECTIVE    ((byte) 35),
+  OP_ADD_CACHE_POOL                       ((byte) 36),
+  OP_MODIFY_CACHE_POOL                    ((byte) 37),
+  OP_REMOVE_CACHE_POOL                    ((byte) 38),
+  OP_MODIFY_CACHE_DIRECTIVE     ((byte) 39),
 
-  private byte opCode;
+  // Note that the current range of the valid OP code is 0~127
+  OP_INVALID                    ((byte) -1);
+
+  private final byte opCode;
 
   /**
    * Constructor
@@ -91,13 +91,21 @@ public enum FSEditLogOpCodes {
     return opCode;
   }
 
-  private static final Map<Byte, FSEditLogOpCodes> byteToEnum =
-    new HashMap<Byte, FSEditLogOpCodes>();
-
+  private static FSEditLogOpCodes[] VALUES;
+  
   static {
-    // initialize byte to enum map
-    for(FSEditLogOpCodes opCode : values())
-      byteToEnum.put(opCode.getOpCode(), opCode);
+    byte max = 0;
+    for (FSEditLogOpCodes code : FSEditLogOpCodes.values()) {
+      if (code.getOpCode() > max) {
+        max = code.getOpCode();
+      }
+    }
+    VALUES = new FSEditLogOpCodes[max + 1];
+    for (FSEditLogOpCodes code : FSEditLogOpCodes.values()) {
+      if (code.getOpCode() >= 0) {
+        VALUES[code.getOpCode()] = code;
+      }
+    }
   }
 
   /**
@@ -107,6 +115,9 @@ public enum FSEditLogOpCodes {
    * @return enum with byte value of opCode
    */
   public static FSEditLogOpCodes fromByte(byte opCode) {
-    return byteToEnum.get(opCode);
+    if (opCode >= 0 && opCode < VALUES.length) {
+      return VALUES[opCode];
+    }
+    return opCode == -1 ? OP_INVALID : null;
   }
 }

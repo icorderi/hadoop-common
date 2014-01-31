@@ -21,7 +21,6 @@ package org.apache.hadoop.fs;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.http.lib.StaticUserWebFilter;
-import org.apache.hadoop.security.authorize.Service;
 
 /** 
  * This class contains constants for configuration keys used
@@ -204,6 +203,14 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String DEFAULT_HADOOP_HTTP_STATIC_USER =
     "dr.who";
 
+  /**
+   * User->groups static mapping to override the groups lookup
+   */
+  public static final String HADOOP_USER_GROUP_STATIC_OVERRIDES = 
+      "hadoop.user.group.static.mapping.overrides";
+  public static final String HADOOP_USER_GROUP_STATIC_OVERRIDES_DEFAULT =
+      "dr.who=;";
+
   /** Enable/Disable aliases serving from jetty */
   public static final String HADOOP_JETTY_LOGS_SERVE_ALIASES =
     "hadoop.jetty.logs.serve.aliases";
@@ -232,4 +239,13 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IPC_SERVER_CONNECTION_IDLE_SCAN_INTERVAL_KEY */
   public static final int IPC_CLIENT_CONNECTION_IDLESCANINTERVAL_DEFAULT =
       10000;
+
+  public static final String HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS =
+    "hadoop.user.group.metrics.percentiles.intervals";
+
+  public static final String RPC_METRICS_QUANTILE_ENABLE =
+      "rpc.metrics.quantile.enable";
+  public static final boolean RPC_METRICS_QUANTILE_ENABLE_DEFAULT = false;
+  public static final String  RPC_METRICS_PERCENTILES_INTERVALS_KEY =
+      "rpc.metrics.percentiles.intervals";
 }

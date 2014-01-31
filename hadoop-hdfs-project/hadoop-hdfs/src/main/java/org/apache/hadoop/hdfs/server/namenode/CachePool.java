@@ -26,9 +26,13 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.protocol.CacheDirective;
+import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolStats;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.IntrusiveCollection;
 
 import com.google.common.base.Preconditions;
 
@@ -45,8 +49,6 @@ import com.google.common.base.Preconditions;
 public final class CachePool {
   public static final Log LOG = LogFactory.getLog(CachePool.class);
 
-  public static final int DEFAULT_WEIGHT = 100;
-  
   @Nonnull
   private final String poolName;
 
@@ -66,8 +68,38 @@ public final class CachePool {
    */
   @Nonnull
   private FsPermission mode;
-  
-  private int weight;
+
+  /**
+   * Maximum number of bytes that can be cached in this pool.
+   */
+  private long limit;
+
+  /**
+   * Maximum duration that a CacheDirective in this pool remains valid,
+   * in milliseconds.
+   */
+  private long maxRelativeExpiryMs;
+
+  private long bytesNeeded;
+  private long bytesCached;
+  private long filesNeeded;
+  private long filesCached;
+
+  public final static class DirectiveList
+      extends IntrusiveCollection<CacheDirective> {
+    private CachePool cachePool;
+
+    private DirectiveList(CachePool cachePool) {
+      this.cachePool = cachePool;
+    }
+
+    public CachePool getCachePool() {
+      return cachePool;
+    }
+  }
+
+  @Nonnull
+  private final DirectiveList directiveList = new DirectiveList(this);
 
   /**
    * Create a new cache pool based on a CachePoolInfo object and the defaults.
@@ -93,10 +125,13 @@ public final class CachePool {
     }
     FsPermission mode = (info.getMode() == null) ? 
         FsPermission.getCachePoolDefault() : info.getMode();
-    Integer weight = (info.getWeight() == null) ?
-        DEFAULT_WEIGHT : info.getWeight();
+    long limit = info.getLimit() == null ?
+        CachePoolInfo.DEFAULT_LIMIT : info.getLimit();
+    long maxRelativeExpiry = info.getMaxRelativeExpiryMs() == null ?
+        CachePoolInfo.DEFAULT_MAX_RELATIVE_EXPIRY :
+        info.getMaxRelativeExpiryMs();
     return new CachePool(info.getPoolName(),
-        ownerName, groupName, mode, weight);
+        ownerName, groupName, mode, limit, maxRelativeExpiry);
   }
 
   /**
@@ -106,11 +141,11 @@ public final class CachePool {
   static CachePool createFromInfo(CachePoolInfo info) {
     return new CachePool(info.getPoolName(),
         info.getOwnerName(), info.getGroupName(),
-        info.getMode(), info.getWeight());
+        info.getMode(), info.getLimit(), info.getMaxRelativeExpiryMs());
   }
 
   CachePool(String poolName, String ownerName, String groupName,
-      FsPermission mode, int weight) {
+      FsPermission mode, long limit, long maxRelativeExpiry) {
     Preconditions.checkNotNull(poolName);
     Preconditions.checkNotNull(ownerName);
     Preconditions.checkNotNull(groupName);
@@ -119,7 +154,8 @@ public final class CachePool {
     this.ownerName = ownerName;
     this.groupName = groupName;
     this.mode = new FsPermission(mode);
-    this.weight = weight;
+    this.limit = limit;
+    this.maxRelativeExpiryMs = maxRelativeExpiry;
   }
 
   public String getPoolName() {
@@ -152,16 +188,25 @@ public final class CachePool {
     this.mode = new FsPermission(mode);
     return this;
   }
-  
-  public int getWeight() {
-    return weight;
+
+  public long getLimit() {
+    return limit;
   }
 
-  public CachePool setWeight(int weight) {
-    this.weight = weight;
+  public CachePool setLimit(long bytes) {
+    this.limit = bytes;
     return this;
   }
-  
+
+  public long getMaxRelativeExpiryMs() {
+    return maxRelativeExpiryMs;
+  }
+
+  public CachePool setMaxRelativeExpiryMs(long expiry) {
+    this.maxRelativeExpiryMs = expiry;
+    return this;
+  }
+
   /**
    * Get either full or partial information about this CachePool.
    *
@@ -171,7 +216,7 @@ public final class CachePool {
    * @return
    *          Cache pool information.
    */
-  private CachePoolInfo getInfo(boolean fullInfo) {
+  CachePoolInfo getInfo(boolean fullInfo) {
     CachePoolInfo info = new CachePoolInfo(poolName);
     if (!fullInfo) {
       return info;
@@ -179,7 +224,69 @@ public final class CachePool {
     return info.setOwnerName(ownerName).
         setGroupName(groupName).
         setMode(new FsPermission(mode)).
-        setWeight(weight);
+        setLimit(limit).
+        setMaxRelativeExpiryMs(maxRelativeExpiryMs);
+  }
+
+  /**
+   * Resets statistics related to this CachePool
+   */
+  public void resetStatistics() {
+    bytesNeeded = 0;
+    bytesCached = 0;
+    filesNeeded = 0;
+    filesCached = 0;
+  }
+
+  public void addBytesNeeded(long bytes) {
+    bytesNeeded += bytes;
+  }
+
+  public void addBytesCached(long bytes) {
+    bytesCached += bytes;
+  }
+
+  public void addFilesNeeded(long files) {
+    filesNeeded += files;
+  }
+
+  public void addFilesCached(long files) {
+    filesCached += files;
+  }
+
+  public long getBytesNeeded() {
+    return bytesNeeded;
+  }
+
+  public long getBytesCached() {
+    return bytesCached;
+  }
+
+  public long getBytesOverlimit() {
+    return Math.max(bytesNeeded-limit, 0);
+  }
+
+  public long getFilesNeeded() {
+    return filesNeeded;
+  }
+
+  public long getFilesCached() {
+    return filesCached;
+  }
+
+  /**
+   * Get statistics about this CachePool.
+   *
+   * @return   Cache pool statistics.
+   */
+  private CachePoolStats getStats() {
+    return new CachePoolStats.Builder().
+        setBytesNeeded(bytesNeeded).
+        setBytesCached(bytesCached).
+        setBytesOverlimit(getBytesOverlimit()).
+        setFilesNeeded(filesNeeded).
+        setFilesCached(filesCached).
+        build();
   }
 
   /**
@@ -189,9 +296,9 @@ public final class CachePool {
    * 
    * @param pc Permission checker to be used to validate the user's permissions,
    *          or null
-   * @return CachePoolInfo describing this CachePool
+   * @return CachePoolEntry describing this CachePool
    */
-  public CachePoolInfo getInfo(FSPermissionChecker pc) {
+  public CachePoolEntry getEntry(FSPermissionChecker pc) {
     boolean hasPermission = true;
     if (pc != null) {
       try {
@@ -200,7 +307,8 @@ public final class CachePool {
         hasPermission = false;
       }
     }
-    return getInfo(hasPermission);
+    return new CachePoolEntry(getInfo(hasPermission), 
+        hasPermission ? getStats() : new CachePoolStats.Builder().build());
   }
 
   public String toString() {
@@ -209,7 +317,12 @@ public final class CachePool {
         append(", ownerName:").append(ownerName).
         append(", groupName:").append(groupName).
         append(", mode:").append(mode).
-        append(", weight:").append(weight).
+        append(", limit:").append(limit).
+        append(", maxRelativeExpiryMs:").append(maxRelativeExpiryMs).
         append(" }").toString();
+  }
+
+  public DirectiveList getDirectiveList() {
+    return directiveList;
   }
 }

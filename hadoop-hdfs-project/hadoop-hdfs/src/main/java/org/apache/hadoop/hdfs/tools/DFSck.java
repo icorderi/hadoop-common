@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;
@@ -37,7 +38,6 @@ import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.util.StringUtils;
@@ -83,15 +83,23 @@ public class DFSck extends Configured implements Tool {
       + "\t-delete\tdelete corrupted files\n"
       + "\t-files\tprint out files being checked\n"
       + "\t-openforwrite\tprint out files opened for write\n"
+      + "\t-includeSnapshots\tinclude snapshot data if the given path"
+      + " indicates a snapshottable directory or there are "
+      + "snapshottable directories under it\n"
       + "\t-list-corruptfileblocks\tprint out list of missing "
       + "blocks and files they belong to\n"
       + "\t-blocks\tprint out block report\n"
       + "\t-locations\tprint out locations for every block\n"
-      + "\t-racks\tprint out network topology for data-node locations\n"
-      + "\t\tBy default fsck ignores files opened for write, "
+      + "\t-racks\tprint out network topology for data-node locations\n\n"
+      + "Please Note:\n"
+      + "\t1. By default fsck ignores files opened for write, "
       + "use -openforwrite to report such files. They are usually "
       + " tagged CORRUPT or HEALTHY depending on their block "
-      + "allocation status";
+      + "allocation status\n"
+      + "\t2. Option -includeSnapshots should not be used for comparing stats,"
+      + " should be used only for HEALTH check, as this may contain duplicates"
+      + " if the same file present in both original fs tree "
+      + "and inside snapshots.";
   
   private final UserGroupInformation ugi;
   private final PrintStream out;
@@ -219,7 +227,7 @@ public class DFSck extends Configured implements Tool {
    * @return Returns http address or null if failure.
    * @throws IOException if we can't determine the active NN address
    */
-  private String getCurrentNamenodeAddress() throws IOException {
+  private URI getCurrentNamenodeAddress() throws IOException {
     //String nnAddress = null;
     Configuration conf = getConf();
 
@@ -237,19 +245,21 @@ public class DFSck extends Configured implements Tool {
       return null;
     }
     
-    return DFSUtil.getInfoServer(HAUtil.getAddressOfActive(fs), conf, false);
+    return DFSUtil.getInfoServer(HAUtil.getAddressOfActive(fs), conf,
+        DFSUtil.getHttpClientScheme(conf));
   }
 
   private int doWork(final String[] args) throws IOException {
-    final StringBuilder url = new StringBuilder(HttpConfig.getSchemePrefix());
+    final StringBuilder url = new StringBuilder();
     
-    String namenodeAddress = getCurrentNamenodeAddress();
+    URI namenodeAddress = getCurrentNamenodeAddress();
     if (namenodeAddress == null) {
       //Error message already output in {@link #getCurrentNamenodeAddress()}
       System.err.println("DFSck exiting.");
       return 0;
     }
-    url.append(namenodeAddress);
+
+    url.append(namenodeAddress.toString());
     System.err.println("Connecting to namenode via " + url.toString());
     
     url.append("/fsck?ugi=").append(ugi.getShortUserName());
@@ -266,6 +276,8 @@ public class DFSck extends Configured implements Tool {
       else if (args[idx].equals("-list-corruptfileblocks")) {
         url.append("&listcorruptfileblocks=1");
         doListCorruptFileBlocks = true;
+      } else if (args[idx].equals("-includeSnapshots")) {
+        url.append("&includeSnapshots=1");
       } else if (!args[idx].startsWith("-")) {
         if (null == dir) {
           dir = args[idx];

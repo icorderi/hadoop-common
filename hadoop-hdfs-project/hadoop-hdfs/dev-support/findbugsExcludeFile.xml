@@ -352,16 +352,19 @@
       <Method name="getReplication" />
       <Bug pattern="ICAST_QUESTIONABLE_UNSIGNED_RIGHT_SHIFT" />
     </Match>
-    <!-- These two are used for shutting down and kicking the CRMon, do not need strong sync -->
     <Match>
-      <Class name="org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor" />
-      <Field name="shutdown" />
-      <Bug pattern="IS2_INCONSISTENT_SYNC" />
+      <Class name="org.apache.hadoop.hdfs.protocol.CacheDirective" />
+      <Method name="insertInternal" />
+      <Bug pattern="BC_UNCONFIRMED_CAST" />
     </Match>
     <Match>
       <Class name="org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor" />
-      <Field name="rescanImmediately" />
-      <Bug pattern="IS2_INCONSISTENT_SYNC" />
+      <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE" />
+    </Match>
+    <Match>
+      <Class name="org.apache.hadoop.hdfs.DFSUtil"/>
+      <Method name="assertAllResultsEqual" />
+      <Bug pattern="NP_LOAD_OF_KNOWN_NULL_VALUE" />
     </Match>
 
  </FindBugsFilter>

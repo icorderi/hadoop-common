@@ -19,18 +19,21 @@
 
 package org.apache.hadoop.http;
 
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.junit.Assert;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.http.HttpServer2.Builder;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URL;
 import java.net.MalformedURLException;
 
 /**
- * This is a base class for functional tests of the {@link HttpServer}.
+ * This is a base class for functional tests of the {@link HttpServer2}.
  * The methods are static for other classes to import statically.
  */
 public class HttpServerFunctionalTest extends Assert {
@@ -51,7 +54,7 @@ public class HttpServerFunctionalTest extends Assert {
    * @throws IOException if a problem occurs
    * @throws AssertionError if a condition was not met
    */
-  public static HttpServer createTestServer() throws IOException {
+  public static HttpServer2 createTestServer() throws IOException {
     prepareTestWebapp();
     return createServer(TEST);
   }
@@ -65,13 +68,13 @@ public class HttpServerFunctionalTest extends Assert {
    * @throws IOException if a problem occurs
    * @throws AssertionError if a condition was not met
    */
-  public static HttpServer createTestServer(Configuration conf)
+  public static HttpServer2 createTestServer(Configuration conf)
       throws IOException {
     prepareTestWebapp();
     return createServer(TEST, conf);
   }
 
-  public static HttpServer createTestServer(Configuration conf, AccessControlList adminsAcl)
+  public static HttpServer2 createTestServer(Configuration conf, AccessControlList adminsAcl)
       throws IOException {
     prepareTestWebapp();
     return createServer(TEST, conf, adminsAcl);
@@ -86,7 +89,7 @@ public class HttpServerFunctionalTest extends Assert {
    * @throws IOException if a problem occurs
    * @throws AssertionError if a condition was not met
    */
-  public static HttpServer createTestServer(Configuration conf, 
+  public static HttpServer2 createTestServer(Configuration conf,
       String[] pathSpecs) throws IOException {
     prepareTestWebapp();
     return createServer(TEST, conf, pathSpecs);
@@ -117,11 +120,12 @@ public class HttpServerFunctionalTest extends Assert {
    * @return the server
    * @throws IOException if it could not be created
    */
-  public static HttpServer createServer(String host, int port)
+  public static HttpServer2 createServer(String host, int port)
       throws IOException {
     prepareTestWebapp();
-    return new HttpServer.Builder().setName(TEST).setBindAddress(host)
-        .setPort(port).setFindPort(true).build();
+    return new HttpServer2.Builder().setName(TEST)
+        .addEndpoint(URI.create("http://" + host + ":" + port))
+        .setFindPort(true).build();
   }
 
   /**
@@ -130,9 +134,8 @@ public class HttpServerFunctionalTest extends Assert {
    * @return the server
    * @throws IOException if it could not be created
    */
-  public static HttpServer createServer(String webapp) throws IOException {
-    return new HttpServer.Builder().setName(webapp).setBindAddress("0.0.0.0")
-        .setPort(0).setFindPort(true).build();
+  public static HttpServer2 createServer(String webapp) throws IOException {
+    return localServerBuilder(webapp).setFindPort(true).build();
   }
   /**
    * Create an HttpServer instance for the given webapp
@@ -141,16 +144,19 @@ public class HttpServerFunctionalTest extends Assert {
    * @return the server
    * @throws IOException if it could not be created
    */
-  public static HttpServer createServer(String webapp, Configuration conf)
+  public static HttpServer2 createServer(String webapp, Configuration conf)
       throws IOException {
-    return new HttpServer.Builder().setName(webapp).setBindAddress("0.0.0.0")
-        .setPort(0).setFindPort(true).setConf(conf).build();
+    return localServerBuilder(webapp).setFindPort(true).setConf(conf).build();
   }
 
-  public static HttpServer createServer(String webapp, Configuration conf, AccessControlList adminsAcl)
+  public static HttpServer2 createServer(String webapp, Configuration conf, AccessControlList adminsAcl)
       throws IOException {
-    return new HttpServer.Builder().setName(webapp).setBindAddress("0.0.0.0")
-        .setPort(0).setFindPort(true).setConf(conf).setACL(adminsAcl).build();
+    return localServerBuilder(webapp).setFindPort(true).setConf(conf).setACL(adminsAcl).build();
+  }
+
+  private static Builder localServerBuilder(String webapp) {
+    return new HttpServer2.Builder().setName(webapp).addEndpoint(
+        URI.create("http://localhost:0"));
   }
   
   /**
@@ -161,10 +167,9 @@ public class HttpServerFunctionalTest extends Assert {
    * @return the server
    * @throws IOException if it could not be created
    */
-  public static HttpServer createServer(String webapp, Configuration conf,
+  public static HttpServer2 createServer(String webapp, Configuration conf,
       String[] pathSpecs) throws IOException {
-    return new HttpServer.Builder().setName(webapp).setBindAddress("0.0.0.0")
-        .setPort(0).setFindPort(true).setConf(conf).setPathSpec(pathSpecs).build();
+    return localServerBuilder(webapp).setFindPort(true).setConf(conf).setPathSpec(pathSpecs).build();
   }
 
   /**
@@ -175,8 +180,8 @@ public class HttpServerFunctionalTest extends Assert {
    * @throws IOException on any failure
    * @throws AssertionError if a condition was not met
    */
-  public static HttpServer createAndStartTestServer() throws IOException {
-    HttpServer server = createTestServer();
+  public static HttpServer2 createAndStartTestServer() throws IOException {
+    HttpServer2 server = createTestServer();
     server.start();
     return server;
   }
@@ -186,7 +191,7 @@ public class HttpServerFunctionalTest extends Assert {
    * @param server to stop
    * @throws Exception on any failure
    */
-  public static void stop(HttpServer server) throws Exception {
+  public static void stop(HttpServer2 server) throws Exception {
     if (server != null) {
       server.stop();
     }
@@ -198,11 +203,11 @@ public class HttpServerFunctionalTest extends Assert {
    * @return a URL bonded to the base of the server
    * @throws MalformedURLException if the URL cannot be created.
    */
-  public static URL getServerURL(HttpServer server)
+  public static URL getServerURL(HttpServer2 server)
       throws MalformedURLException {
     assertNotNull("No server", server);
-    int port = server.getPort();
-    return new URL("http://localhost:" + port + "/");
+    return new URL("http://"
+        + NetUtils.getHostPortString(server.getConnectorAddress(0)));
   }
 
   /**

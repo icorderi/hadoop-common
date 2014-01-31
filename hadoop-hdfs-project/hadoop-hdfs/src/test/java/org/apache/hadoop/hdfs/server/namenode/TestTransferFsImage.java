@@ -34,11 +34,11 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.http.HttpServerFunctionalTest;
-import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.test.PathUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.junit.Test;
@@ -66,8 +66,9 @@ public class TestTransferFsImage {
         new File("/xxxxx-does-not-exist/blah"));
        
     try {
-      String fsName = NetUtils.getHostPortString(
-          cluster.getNameNode().getHttpAddress());
+      URL fsName = DFSUtil.getInfoServer(
+          cluster.getNameNode().getServiceRpcAddress(), conf,
+          DFSUtil.getHttpClientScheme(conf)).toURL();
       String id = "getimage=1&txid=0";
 
       TransferFsImage.getFileClient(fsName, id, localPath, mockStorage, false);      
@@ -98,8 +99,10 @@ public class TestTransferFsImage {
         );
        
     try {
-      String fsName = NetUtils.getHostPortString(
-          cluster.getNameNode().getHttpAddress());
+      URL fsName = DFSUtil.getInfoServer(
+          cluster.getNameNode().getServiceRpcAddress(), conf,
+          DFSUtil.getHttpClientScheme(conf)).toURL();
+
       String id = "getimage=1&txid=0";
 
       TransferFsImage.getFileClient(fsName, id, localPaths, mockStorage, false);      
@@ -116,14 +119,14 @@ public class TestTransferFsImage {
    */
   @Test(timeout = 5000)
   public void testImageTransferTimeout() throws Exception {
-    HttpServer testServer = HttpServerFunctionalTest.createServer("hdfs");
+    HttpServer2 testServer = HttpServerFunctionalTest.createServer("hdfs");
     try {
       testServer.addServlet("GetImage", "/getimage", TestGetImageServlet.class);
       testServer.start();
       URL serverURL = HttpServerFunctionalTest.getServerURL(testServer);
       TransferFsImage.timeout = 2000;
       try {
-        TransferFsImage.getFileClient(serverURL.getAuthority(), "txid=1", null,
+        TransferFsImage.getFileClient(serverURL, "txid=1", null,
             null, false);
         fail("TransferImage Should fail with timeout");
       } catch (SocketTimeoutException e) {

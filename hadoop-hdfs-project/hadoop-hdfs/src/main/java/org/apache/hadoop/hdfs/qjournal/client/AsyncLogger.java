@@ -27,6 +27,7 @@ import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.NewEpochR
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.PrepareRecoveryResponseProto;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.SegmentStateProto;
 import org.apache.hadoop.hdfs.qjournal.protocol.RequestInfo;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 
@@ -109,7 +110,7 @@ interface AsyncLogger {
    * Fetch the list of edit logs available on the remote node.
    */
   public ListenableFuture<RemoteEditLogManifest> getEditLogManifest(
-      long fromTxnId, boolean forReading, boolean inProgressOk);
+      long fromTxnId, boolean inProgressOk);
 
   /**
    * Prepare recovery. See the HDFS-3077 design document for details.
@@ -150,5 +151,18 @@ interface AsyncLogger {
    * Append an HTML-formatted report for this logger's status to the provided
    * StringBuilder. This is displayed on the NN web UI.
    */
-  public void appendHtmlReport(StringBuilder sb);
+  public void appendReport(StringBuilder sb);
+
+  public ListenableFuture<Void> doPreUpgrade();
+
+  public ListenableFuture<Void> doUpgrade(StorageInfo sInfo);
+
+  public ListenableFuture<Void> doFinalize();
+
+  public ListenableFuture<Boolean> canRollBack(StorageInfo storage,
+      StorageInfo prevStorage, int targetLayoutVersion);
+
+  public ListenableFuture<Void> doRollback();
+
+  public ListenableFuture<Long> getJournalCTime();
 }

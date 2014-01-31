@@ -36,21 +36,25 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.HdfsBlockLocation;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.LogVerificationAppender;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetCache;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetCache.PageRounder;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.MappableBlock;
 import org.apache.hadoop.hdfs.server.namenode.EditLogFileOutputStream;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -72,6 +76,8 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.apache.log4j.Level;
+import org.apache.log4j.LogManager;
 
 import com.google.common.base.Supplier;
 
@@ -80,7 +86,11 @@ public class TestFsDatasetCache {
 
   // Most Linux installs allow a default of 64KB locked memory
   private static final long CACHE_CAPACITY = 64 * 1024;
-  private static final long BLOCK_SIZE = 4096;
+  // mlock always locks the entire page. So we don't need to deal with this
+  // rounding, use the OS page size for the block size.
+  private static final long PAGE_SIZE =
+      NativeIO.POSIX.getCacheManipulator().getOperatingSystemPageSize();
+  private static final long BLOCK_SIZE = PAGE_SIZE;
 
   private static Configuration conf;
   private static MiniDFSCluster cluster = null;
@@ -95,20 +105,23 @@ public class TestFsDatasetCache {
 
   static {
     EditLogFileOutputStream.setShouldSkipFsyncForTesting(false);
+    LogManager.getLogger(FsDatasetCache.class).setLevel(Level.DEBUG);
   }
 
   @Before
   public void setUp() throws Exception {
     assumeTrue(!Path.WINDOWS);
     conf = new HdfsConfiguration();
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_CACHING_ENABLED_KEY, true);
-    conf.setLong(DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_RETRY_INTERVAL_MS,
-        500);
+    conf.setLong(
+        DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_REFRESH_INTERVAL_MS, 100);
+    conf.setLong(DFSConfigKeys.DFS_CACHEREPORT_INTERVAL_MSEC_KEY, 500);
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
     conf.setLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
         CACHE_CAPACITY);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_CACHING_ENABLED_KEY, true);
+
+    prevCacheManipulator = NativeIO.POSIX.getCacheManipulator();
+    NativeIO.POSIX.setCacheManipulator(new NoMlockCacheManipulator());
 
     cluster = new MiniDFSCluster.Builder(conf)
         .numDataNodes(1).build();
@@ -122,8 +135,6 @@ public class TestFsDatasetCache {
 
     spyNN = DataNodeTestUtils.spyOnBposToNN(dn, nn);
 
-    prevCacheManipulator = NativeIO.POSIX.getCacheManipulator();
-    NativeIO.POSIX.setCacheManipulator(new NoMlockCacheManipulator());
   }
 
   @After
@@ -201,17 +212,21 @@ public class TestFsDatasetCache {
   /**
    * Blocks until cache usage hits the expected new value.
    */
-  private long verifyExpectedCacheUsage(final long expected) throws Exception {
+  private long verifyExpectedCacheUsage(final long expectedCacheUsed,
+      final long expectedBlocks) throws Exception {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       private int tries = 0;
       
       @Override
       public Boolean get() {
-        long curDnCacheUsed = fsd.getCacheUsed();
-        if (curDnCacheUsed != expected) {
+        long curCacheUsed = fsd.getCacheUsed();
+        long curBlocks = fsd.getNumBlocksCached();
+        if ((curCacheUsed != expectedCacheUsed) ||
+            (curBlocks != expectedBlocks)) {
           if (tries++ > 10) {
-            LOG.info("verifyExpectedCacheUsage: expected " +
-                expected + ", got " + curDnCacheUsed + "; " +
+            LOG.info("verifyExpectedCacheUsage: have " +
+                curCacheUsed + "/" + expectedCacheUsed + " bytes cached; " +
+                curBlocks + "/" + expectedBlocks + " blocks cached. " +
                 "memlock limit = " +
                 NativeIO.POSIX.getCacheManipulator().getMemlockLimit() +
                 ".  Waiting...");
@@ -221,14 +236,15 @@ public class TestFsDatasetCache {
         return true;
       }
     }, 100, 60000);
-    return expected;
+    return expectedCacheUsed;
   }
 
   private void testCacheAndUncacheBlock() throws Exception {
     LOG.info("beginning testCacheAndUncacheBlock");
     final int NUM_BLOCKS = 5;
 
-    verifyExpectedCacheUsage(0);
+    verifyExpectedCacheUsage(0, 0);
+    assertEquals(0, fsd.getNumBlocksCached());
 
     // Write a test file
     final Path testFile = new Path("/testCacheBlock");
@@ -255,7 +271,7 @@ public class TestFsDatasetCache {
     // Cache each block in succession, checking each time
     for (int i=0; i<NUM_BLOCKS; i++) {
       setHeartbeatResponse(cacheBlock(locs[i]));
-      current = verifyExpectedCacheUsage(current + blockSizes[i]);
+      current = verifyExpectedCacheUsage(current + blockSizes[i], i + 1);
       dnMetrics = getMetrics(dn.getMetrics().name());
       long cmds = MetricsAsserts.getLongCounter("BlocksCached", dnMetrics);
       assertTrue("Expected more cache requests from the NN ("
@@ -267,7 +283,8 @@ public class TestFsDatasetCache {
     // Uncache each block in succession, again checking each time
     for (int i=0; i<NUM_BLOCKS; i++) {
       setHeartbeatResponse(uncacheBlock(locs[i]));
-      current = verifyExpectedCacheUsage(current - blockSizes[i]);
+      current = verifyExpectedCacheUsage(current - blockSizes[i],
+          NUM_BLOCKS - 1 - i);
       dnMetrics = getMetrics(dn.getMetrics().name());
       long cmds = MetricsAsserts.getLongCounter("BlocksUncached", dnMetrics);
       assertTrue("Expected more uncache requests from the NN",
@@ -315,7 +332,7 @@ public class TestFsDatasetCache {
 
     // Create some test files that will exceed total cache capacity
     final int numFiles = 5;
-    final long fileSize = 15000;
+    final long fileSize = CACHE_CAPACITY / (numFiles-1);
 
     final Path[] testFiles = new Path[numFiles];
     final HdfsBlockLocation[][] fileLocs = new HdfsBlockLocation[numFiles][];
@@ -334,10 +351,11 @@ public class TestFsDatasetCache {
 
     // Cache the first n-1 files
     long total = 0;
-    verifyExpectedCacheUsage(0);
+    verifyExpectedCacheUsage(0, 0);
     for (int i=0; i<numFiles-1; i++) {
       setHeartbeatResponse(cacheBlocks(fileLocs[i]));
-      total = verifyExpectedCacheUsage(rounder.round(total + fileSizes[i]));
+      total = verifyExpectedCacheUsage(
+          rounder.round(total + fileSizes[i]), 4 * (i + 1));
     }
 
     // nth file should hit a capacity exception
@@ -363,7 +381,7 @@ public class TestFsDatasetCache {
     for (int i=0; i<numFiles-1; i++) {
       setHeartbeatResponse(uncacheBlocks(fileLocs[i]));
       total -= rounder.round(fileSizes[i]);
-      verifyExpectedCacheUsage(total);
+      verifyExpectedCacheUsage(total, 4 * (numFiles - 2 - i));
     }
     LOG.info("finishing testFilesExceedMaxLockedMemory");
   }
@@ -373,7 +391,7 @@ public class TestFsDatasetCache {
     LOG.info("beginning testUncachingBlocksBeforeCachingFinishes");
     final int NUM_BLOCKS = 5;
 
-    verifyExpectedCacheUsage(0);
+    verifyExpectedCacheUsage(0, 0);
 
     // Write a test file
     final Path testFile = new Path("/testCacheBlock");
@@ -409,7 +427,7 @@ public class TestFsDatasetCache {
     // should increase, even though caching doesn't complete on any of them.
     for (int i=0; i<NUM_BLOCKS; i++) {
       setHeartbeatResponse(cacheBlock(locs[i]));
-      current = verifyExpectedCacheUsage(current + blockSizes[i]);
+      current = verifyExpectedCacheUsage(current + blockSizes[i], i + 1);
     }
     
     setHeartbeatResponse(new DatanodeCommand[] {
@@ -417,7 +435,7 @@ public class TestFsDatasetCache {
     });
 
     // wait until all caching jobs are finished cancelling.
-    current = verifyExpectedCacheUsage(0);
+    current = verifyExpectedCacheUsage(0, 0);
     LOG.info("finishing testUncachingBlocksBeforeCachingFinishes");
   }
 
@@ -439,5 +457,66 @@ public class TestFsDatasetCache {
         return fsd.getNumBlocksFailedToUncache() > 0;
       }
     }, 100, 10000);
+  }
+
+  @Test(timeout=60000)
+  public void testPageRounder() throws Exception {
+    // Write a small file
+    Path fileName = new Path("/testPageRounder");
+    final int smallBlocks = 512; // This should be smaller than the page size
+    assertTrue("Page size should be greater than smallBlocks!",
+        PAGE_SIZE > smallBlocks);
+    final int numBlocks = 5;
+    final int fileLen = smallBlocks * numBlocks;
+    FSDataOutputStream out =
+        fs.create(fileName, false, 4096, (short)1, smallBlocks);
+    out.write(new byte[fileLen]);
+    out.close();
+    HdfsBlockLocation[] locs = (HdfsBlockLocation[])fs.getFileBlockLocations(
+        fileName, 0, fileLen);
+    // Cache the file and check the sizes match the page size
+    setHeartbeatResponse(cacheBlocks(locs));
+    verifyExpectedCacheUsage(PAGE_SIZE * numBlocks, numBlocks);
+    // Uncache and check that it decrements by the page size too
+    setHeartbeatResponse(uncacheBlocks(locs));
+    verifyExpectedCacheUsage(0, 0);
+  }
+
+  @Test(timeout=60000)
+  public void testUncacheQuiesces() throws Exception {
+    // Create a file
+    Path fileName = new Path("/testUncacheQuiesces");
+    int fileLen = 4096;
+    DFSTestUtil.createFile(fs, fileName, fileLen, (short)1, 0xFDFD);
+    // Cache it
+    DistributedFileSystem dfs = cluster.getFileSystem();
+    dfs.addCachePool(new CachePoolInfo("pool"));
+    dfs.addCacheDirective(new CacheDirectiveInfo.Builder()
+        .setPool("pool").setPath(fileName).setReplication((short)3).build());
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        MetricsRecordBuilder dnMetrics = getMetrics(dn.getMetrics().name());
+        long blocksCached =
+            MetricsAsserts.getLongCounter("BlocksCached", dnMetrics);
+        return blocksCached > 0;
+      }
+    }, 1000, 30000);
+    // Uncache it
+    dfs.removeCacheDirective(1);
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        MetricsRecordBuilder dnMetrics = getMetrics(dn.getMetrics().name());
+        long blocksUncached =
+            MetricsAsserts.getLongCounter("BlocksUncached", dnMetrics);
+        return blocksUncached > 0;
+      }
+    }, 1000, 30000);
+    // Make sure that no additional messages were sent
+    Thread.sleep(10000);
+    MetricsRecordBuilder dnMetrics = getMetrics(dn.getMetrics().name());
+    MetricsAsserts.assertCounter("BlocksCached", 1l, dnMetrics);
+    MetricsAsserts.assertCounter("BlocksUncached", 1l, dnMetrics);
   }
 }

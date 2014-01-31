@@ -29,9 +29,9 @@ import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.GetJourna
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.NewEpochResponseProto;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.PrepareRecoveryResponseProto;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.SegmentStateProto;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
-import org.apache.jasper.compiler.JspUtil;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
@@ -177,17 +177,16 @@ class AsyncLoggerSet {
    * state of the underlying loggers.
    * @param sb the StringBuilder to append to
    */
-  void appendHtmlReport(StringBuilder sb) {
-    sb.append("<table class=\"storage\">");
-    sb.append("<thead><tr><td>JN</td><td>Status</td></tr></thead>\n");
-    for (AsyncLogger l : loggers) {
-      sb.append("<tr>");
-      sb.append("<td>" + JspUtil.escapeXml(l.toString()) + "</td>");
-      sb.append("<td>");
-      l.appendHtmlReport(sb);
-      sb.append("</td></tr>\n");
+  void appendReport(StringBuilder sb) {
+    for (int i = 0, len = loggers.size(); i < len; ++i) {
+      AsyncLogger l = loggers.get(i);
+      if (i != 0) {
+        sb.append(", ");
+      }
+      sb.append(l).append(" (");
+      l.appendReport(sb);
+      sb.append(")");
     }
-    sb.append("</table>");
   }
 
   /**
@@ -263,13 +262,13 @@ class AsyncLoggerSet {
   }
 
   public QuorumCall<AsyncLogger, RemoteEditLogManifest> getEditLogManifest(
-      long fromTxnId, boolean forReading, boolean inProgressOk) {
+      long fromTxnId, boolean inProgressOk) {
     Map<AsyncLogger,
         ListenableFuture<RemoteEditLogManifest>> calls
         = Maps.newHashMap();
     for (AsyncLogger logger : loggers) {
       ListenableFuture<RemoteEditLogManifest> future =
-          logger.getEditLogManifest(fromTxnId, forReading, inProgressOk);
+          logger.getEditLogManifest(fromTxnId, inProgressOk);
       calls.put(logger, future);
     }
     return QuorumCall.create(calls);
@@ -310,4 +309,71 @@ class AsyncLoggerSet {
     }
     return QuorumCall.create(calls);
   }
+  
+  QuorumCall<AsyncLogger, Void> doPreUpgrade() {
+    Map<AsyncLogger, ListenableFuture<Void>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Void> future =
+          logger.doPreUpgrade();
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
+  public QuorumCall<AsyncLogger, Void> doUpgrade(StorageInfo sInfo) {
+    Map<AsyncLogger, ListenableFuture<Void>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Void> future =
+          logger.doUpgrade(sInfo);
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
+  public QuorumCall<AsyncLogger, Void> doFinalize() {
+    Map<AsyncLogger, ListenableFuture<Void>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Void> future =
+          logger.doFinalize();
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
+  public QuorumCall<AsyncLogger, Boolean> canRollBack(StorageInfo storage,
+      StorageInfo prevStorage, int targetLayoutVersion) {
+    Map<AsyncLogger, ListenableFuture<Boolean>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Boolean> future =
+          logger.canRollBack(storage, prevStorage, targetLayoutVersion);
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
+  public QuorumCall<AsyncLogger, Void> doRollback() {
+    Map<AsyncLogger, ListenableFuture<Void>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Void> future =
+          logger.doRollback();
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
+  public QuorumCall<AsyncLogger, Long> getJournalCTime() {
+    Map<AsyncLogger, ListenableFuture<Long>> calls =
+        Maps.newHashMap();
+    for (AsyncLogger logger : loggers) {
+      ListenableFuture<Long> future = logger.getJournalCTime();
+      calls.put(logger, future);
+    }
+    return QuorumCall.create(calls);
+  }
+
 }

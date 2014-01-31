@@ -20,6 +20,8 @@ package org.apache.hadoop.hdfs.tools;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URL;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -45,11 +47,12 @@ import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.SnapshotException;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.SnapshotException;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.TransferFsImage;
 import org.apache.hadoop.ipc.RPC;
@@ -547,8 +550,10 @@ public class DFSAdmin extends FsShell {
    * @throws IOException
    */
   public int fetchImage(final String[] argv, final int idx) throws IOException {
-    final String infoServer = DFSUtil.getInfoServer(
-        HAUtil.getAddressOfActive(getDFS()), getConf(), false);
+    Configuration conf = getConf();
+    final URL infoServer = DFSUtil.getInfoServer(
+        HAUtil.getAddressOfActive(getDFS()), conf,
+        DFSUtil.getHttpClientScheme(conf)).toURL();
     SecurityUtil.doAsCurrentUser(new PrivilegedExceptionAction<Void>() {
       @Override
       public Void run() throws Exception {
@@ -766,7 +771,24 @@ public class DFSAdmin extends FsShell {
    */
   public int finalizeUpgrade() throws IOException {
     DistributedFileSystem dfs = getDFS();
-    dfs.finalizeUpgrade();
+    
+    Configuration dfsConf = dfs.getConf();
+    URI dfsUri = dfs.getUri();
+    boolean isHaEnabled = HAUtil.isLogicalUri(dfsConf, dfsUri);
+    if (isHaEnabled) {
+      // In the case of HA, run finalizeUpgrade for all NNs in this nameservice
+      String nsId = dfsUri.getHost();
+      List<ClientProtocol> namenodes =
+          HAUtil.getProxiesForAllNameNodesInNameservice(dfsConf, nsId);
+      if (!HAUtil.isAtLeastOneActive(namenodes)) {
+        throw new IOException("Cannot finalize with no NameNode active");
+      }
+      for (ClientProtocol haNn : namenodes) {
+        haNn.finalizeUpgrade();
+      }
+    } else {
+      dfs.finalizeUpgrade();
+    }
     
     return 0;
   }

@@ -37,6 +37,7 @@ import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.SegmentSt
 import org.apache.hadoop.hdfs.qjournal.protocol.RequestInfo;
 import org.apache.hadoop.hdfs.qjournal.protocolPB.QJournalProtocolPB;
 import org.apache.hadoop.hdfs.qjournal.protocolPB.QJournalProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
@@ -115,6 +116,7 @@ class JournalNodeRpcServer implements QJournalProtocol {
     return jn.getOrCreateJournal(journalId).isFormatted();
   }
 
+  @SuppressWarnings("deprecation")
   @Override
   public GetJournalStateResponseProto getJournalState(String journalId)
         throws IOException {
@@ -122,6 +124,7 @@ class JournalNodeRpcServer implements QJournalProtocol {
     return GetJournalStateResponseProto.newBuilder()
         .setLastPromisedEpoch(epoch)
         .setHttpPort(jn.getBoundHttpAddress().getPort())
+        .setFromURL(jn.getHttpServerURI())
         .build();
   }
 
@@ -173,17 +176,19 @@ class JournalNodeRpcServer implements QJournalProtocol {
       .purgeLogsOlderThan(reqInfo, minTxIdToKeep);
   }
 
+  @SuppressWarnings("deprecation")
   @Override
   public GetEditLogManifestResponseProto getEditLogManifest(String jid,
-      long sinceTxId, boolean forReading, boolean inProgressOk)
+      long sinceTxId, boolean inProgressOk)
       throws IOException {
     
     RemoteEditLogManifest manifest = jn.getOrCreateJournal(jid)
-        .getEditLogManifest(sinceTxId, forReading, inProgressOk);
+        .getEditLogManifest(sinceTxId, inProgressOk);
     
     return GetEditLogManifestResponseProto.newBuilder()
         .setManifest(PBHelper.convert(manifest))
         .setHttpPort(jn.getBoundHttpAddress().getPort())
+        .setFromURL(jn.getHttpServerURI())
         .build();
   }
 
@@ -201,4 +206,35 @@ class JournalNodeRpcServer implements QJournalProtocol {
         .acceptRecovery(reqInfo, log, fromUrl);
   }
 
+  @Override
+  public void doPreUpgrade(String journalId) throws IOException {
+    jn.doPreUpgrade(journalId);
+  }
+
+  @Override
+  public void doUpgrade(String journalId, StorageInfo sInfo) throws IOException {
+    jn.doUpgrade(journalId, sInfo);
+  }
+
+  @Override
+  public void doFinalize(String journalId) throws IOException {
+    jn.doFinalize(journalId);
+  }
+
+  @Override
+  public Boolean canRollBack(String journalId, StorageInfo storage,
+      StorageInfo prevStorage, int targetLayoutVersion)
+      throws IOException {
+    return jn.canRollBack(journalId, storage, prevStorage, targetLayoutVersion);
+  }
+
+  @Override
+  public void doRollback(String journalId) throws IOException {
+    jn.doRollback(journalId);
+  }
+
+  @Override
+  public Long getJournalCTime(String journalId) throws IOException {
+    return jn.getJournalCTime(journalId);
+  }
 }

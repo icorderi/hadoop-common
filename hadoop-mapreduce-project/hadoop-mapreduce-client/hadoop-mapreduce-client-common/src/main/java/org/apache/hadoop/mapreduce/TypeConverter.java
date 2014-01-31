@@ -43,6 +43,7 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
+import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.QueueACL;
@@ -300,6 +301,8 @@ public class TypeConverter {
             .getCleanupProgress(), fromYarn(jobreport.getJobState()),
         jobPriority, jobreport.getUser(), jobreport.getJobName(), jobreport
             .getJobFile(), trackingUrl, jobreport.isUber());
+    jobStatus.setStartTime(jobreport.getStartTime());
+    jobStatus.setFinishTime(jobreport.getFinishTime());
     jobStatus.setFailureInfo(jobreport.getDiagnostics());
     return jobStatus;
   }
@@ -441,12 +444,20 @@ public class TypeConverter {
       );
     jobStatus.setSchedulingInfo(trackingUrl); // Set AM tracking url
     jobStatus.setStartTime(application.getStartTime());
+    jobStatus.setFinishTime(application.getFinishTime());
     jobStatus.setFailureInfo(application.getDiagnostics());
-    jobStatus.setNeededMem(application.getApplicationResourceUsageReport().getNeededResources().getMemory());
-    jobStatus.setNumReservedSlots(application.getApplicationResourceUsageReport().getNumReservedContainers());
-    jobStatus.setNumUsedSlots(application.getApplicationResourceUsageReport().getNumUsedContainers());
-    jobStatus.setReservedMem(application.getApplicationResourceUsageReport().getReservedResources().getMemory());
-    jobStatus.setUsedMem(application.getApplicationResourceUsageReport().getUsedResources().getMemory());
+    ApplicationResourceUsageReport resourceUsageReport =
+        application.getApplicationResourceUsageReport();
+    if (resourceUsageReport != null) {
+      jobStatus.setNeededMem(
+          resourceUsageReport.getNeededResources().getMemory());
+      jobStatus.setNumReservedSlots(
+          resourceUsageReport.getNumReservedContainers());
+      jobStatus.setNumUsedSlots(resourceUsageReport.getNumUsedContainers());
+      jobStatus.setReservedMem(
+          resourceUsageReport.getReservedResources().getMemory());
+      jobStatus.setUsedMem(resourceUsageReport.getUsedResources().getMemory());
+    }
     return jobStatus;
   }
 

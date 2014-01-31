@@ -29,6 +29,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpCookie;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +43,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.util.StringUtils;
@@ -126,7 +127,7 @@ public class TestWebAppProxyServlet {
     proxy.init(configuration);
     proxy.start();
     
-    int proxyPort = proxy.proxy.proxyServer.getPort();
+    int proxyPort = proxy.proxy.proxyServer.getConnectorAddress(0).getPort();
     AppReportFetcherForTest appReportFetcher = proxy.proxy.appReportFetcher;
 
     // wrong url
@@ -183,8 +184,10 @@ public class TestWebAppProxyServlet {
   @Test(timeout=5000)
   public void testWebAppProxyServerMainMethod() throws Exception {
     WebAppProxyServer mainServer = null;
+    Configuration conf = new YarnConfiguration();
+    conf.set(YarnConfiguration.PROXY_ADDRESS, "localhost:9099");
     try {
-      mainServer  = WebAppProxyServer.startServer();
+      mainServer  = WebAppProxyServer.startServer(conf);
       int counter = 20;
 
       URL wrongUrl = new URL("http://localhost:9099/proxy/app");
@@ -271,7 +274,7 @@ public class TestWebAppProxyServlet {
 
   private class WebAppProxyForTest extends WebAppProxy {
     
-    HttpServer proxyServer;
+    HttpServer2 proxyServer;
     AppReportFetcherForTest appReportFetcher;
     
     @Override
@@ -283,10 +286,9 @@ public class TestWebAppProxyServlet {
         AccessControlList acl = new AccessControlList(
             conf.get(YarnConfiguration.YARN_ADMIN_ACL, 
             YarnConfiguration.DEFAULT_YARN_ADMIN_ACL));
-        proxyServer = new HttpServer.Builder()
+        proxyServer = new HttpServer2.Builder()
             .setName("proxy")
-            .setBindAddress(bindAddress)
-            .setPort(0)
+            .addEndpoint(URI.create("http://" + bindAddress + ":0"))
             .setFindPort(true)
             .setConf(conf)
             .setACL(acl)
@@ -306,7 +308,7 @@ public class TestWebAppProxyServlet {
         proxyServer.setAttribute(PROXY_HOST_ATTRIBUTE, proxyHost);
         proxyServer.start();
         System.out.println("Proxy server is started at port " + 
-            proxyServer.getPort());
+            proxyServer.getConnectorAddress(0).getPort());
       } catch (Exception e) {
         LOG.fatal("Could not start proxy web server", e);
         throw new YarnRuntimeException("Could not start proxy web server", e);

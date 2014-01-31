@@ -29,7 +29,9 @@ public class CacheDirectiveStats {
   public static class Builder {
     private long bytesNeeded;
     private long bytesCached;
-    private long filesAffected;
+    private long filesNeeded;
+    private long filesCached;
+    private boolean hasExpired;
 
     /**
      * Builds a new CacheDirectiveStats populated with the set properties.
@@ -37,7 +39,8 @@ public class CacheDirectiveStats {
      * @return New CacheDirectiveStats.
      */
     public CacheDirectiveStats build() {
-      return new CacheDirectiveStats(bytesNeeded, bytesCached, filesAffected);
+      return new CacheDirectiveStats(bytesNeeded, bytesCached, filesNeeded,
+          filesCached, hasExpired);
     }
 
     /**
@@ -52,7 +55,7 @@ public class CacheDirectiveStats {
      * @param bytesNeeded The bytes needed.
      * @return This builder, for call chaining.
      */
-    public Builder setBytesNeeded(Long bytesNeeded) {
+    public Builder setBytesNeeded(long bytesNeeded) {
       this.bytesNeeded = bytesNeeded;
       return this;
     }
@@ -63,53 +66,92 @@ public class CacheDirectiveStats {
      * @param bytesCached The bytes cached.
      * @return This builder, for call chaining.
      */
-    public Builder setBytesCached(Long bytesCached) {
+    public Builder setBytesCached(long bytesCached) {
       this.bytesCached = bytesCached;
       return this;
     }
 
     /**
-     * Sets the files affected by this directive.
-     * 
-     * @param filesAffected The files affected.
+     * Sets the files needed by this directive.
+     * @param filesNeeded The number of files needed
      * @return This builder, for call chaining.
      */
-    public Builder setFilesAffected(Long filesAffected) {
-      this.filesAffected = filesAffected;
+    public Builder setFilesNeeded(long filesNeeded) {
+      this.filesNeeded = filesNeeded;
+      return this;
+    }
+
+    /**
+     * Sets the files cached by this directive.
+     * 
+     * @param filesCached The number of files cached.
+     * @return This builder, for call chaining.
+     */
+    public Builder setFilesCached(long filesCached) {
+      this.filesCached = filesCached;
+      return this;
+    }
+
+    /**
+     * Sets whether this directive has expired.
+     * 
+     * @param hasExpired if this directive has expired
+     * @return This builder, for call chaining.
+     */
+    public Builder setHasExpired(boolean hasExpired) {
+      this.hasExpired = hasExpired;
       return this;
     }
   }
 
   private final long bytesNeeded;
   private final long bytesCached;
-  private final long filesAffected;
+  private final long filesNeeded;
+  private final long filesCached;
+  private final boolean hasExpired;
 
   private CacheDirectiveStats(long bytesNeeded, long bytesCached,
-      long filesAffected) {
+      long filesNeeded, long filesCached, boolean hasExpired) {
     this.bytesNeeded = bytesNeeded;
     this.bytesCached = bytesCached;
-    this.filesAffected = filesAffected;
+    this.filesNeeded = filesNeeded;
+    this.filesCached = filesCached;
+    this.hasExpired = hasExpired;
   }
 
   /**
    * @return The bytes needed.
    */
-  public Long getBytesNeeded() {
+  public long getBytesNeeded() {
     return bytesNeeded;
   }
 
   /**
    * @return The bytes cached.
    */
-  public Long getBytesCached() {
+  public long getBytesCached() {
     return bytesCached;
   }
 
   /**
-   * @return The files affected.
+   * @return The number of files needed.
    */
-  public Long getFilesAffected() {
-    return filesAffected;
+  public long getFilesNeeded() {
+    return filesNeeded;
+  }
+
+  /**
+   * @return The number of files cached.
+   */
+  public long getFilesCached() {
+    return filesCached;
+  }
+
+  /**
+   * @return Whether this directive has expired.
+   */
+  public boolean hasExpired() {
+    return hasExpired;
   }
 
   @Override
@@ -118,7 +160,9 @@ public class CacheDirectiveStats {
     builder.append("{");
     builder.append("bytesNeeded: ").append(bytesNeeded);
     builder.append(", ").append("bytesCached: ").append(bytesCached);
-    builder.append(", ").append("filesAffected: ").append(filesAffected);
+    builder.append(", ").append("filesNeeded: ").append(filesNeeded);
+    builder.append(", ").append("filesCached: ").append(filesCached);
+    builder.append(", ").append("hasExpired: ").append(hasExpired);
     builder.append("}");
     return builder.toString();
   }

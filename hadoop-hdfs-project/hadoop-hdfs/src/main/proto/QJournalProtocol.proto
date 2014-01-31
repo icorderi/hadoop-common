@@ -134,6 +134,72 @@ message IsFormattedResponseProto {
 }
 
 /**
+ * getJournalCTime()
+ */
+message GetJournalCTimeRequestProto {
+  required JournalIdProto jid = 1;
+}
+
+message GetJournalCTimeResponseProto {
+  required int64 resultCTime = 1;
+}
+
+/**
+ * doPreUpgrade()
+ */
+message DoPreUpgradeRequestProto {
+  required JournalIdProto jid = 1;
+}
+
+message DoPreUpgradeResponseProto {
+}
+
+/**
+ * doUpgrade()
+ */
+message DoUpgradeRequestProto {
+  required JournalIdProto jid = 1;
+  required StorageInfoProto sInfo = 2;
+}
+
+message DoUpgradeResponseProto {
+}
+
+/**
+ * doFinalize()
+ */
+message DoFinalizeRequestProto {
+  required JournalIdProto jid = 1;
+}
+
+message DoFinalizeResponseProto {
+}
+
+/**
+ * canRollBack()
+ */
+message CanRollBackRequestProto {
+  required JournalIdProto jid = 1;
+  required StorageInfoProto storage = 2;
+  required StorageInfoProto prevStorage = 3;
+  required int32 targetLayoutVersion = 4;
+}
+
+message CanRollBackResponseProto {
+  required bool canRollBack = 1;
+}
+
+/**
+ * doRollback()
+ */
+message DoRollbackRequestProto {
+  required JournalIdProto jid = 1;
+}
+
+message DoRollbackResponseProto {
+}
+
+/**
  * getJournalState()
  */
 message GetJournalStateRequestProto {
@@ -142,7 +208,9 @@ message GetJournalStateRequestProto {
 
 message GetJournalStateResponseProto {
   required uint64 lastPromisedEpoch = 1;
+  // Deprecated by fromURL
   required uint32 httpPort = 2;
+  optional string fromURL = 3;
 }
 
 /**
@@ -176,13 +244,15 @@ message GetEditLogManifestRequestProto {
   required JournalIdProto jid = 1;
   required uint64 sinceTxId = 2;  // Transaction ID
   // Whether or not the client will be reading from the returned streams.
-  optional bool forReading = 3 [default = true];
+  // optional bool forReading = 3 [default = true]; <obsolete, do not reuse>
   optional bool inProgressOk = 4 [default = false];
 }
 
 message GetEditLogManifestResponseProto {
   required RemoteEditLogManifestProto manifest = 1; 
+  // Deprecated by fromURL
   required uint32 httpPort = 2;
+  optional string fromURL = 3;
 
   // TODO: we should add nsinfo somewhere
   // to verify that it matches up with our expectation
@@ -231,6 +301,18 @@ message AcceptRecoveryResponseProto {
  */
 service QJournalProtocolService {
   rpc isFormatted(IsFormattedRequestProto) returns (IsFormattedResponseProto);
+
+  rpc getJournalCTime(GetJournalCTimeRequestProto) returns (GetJournalCTimeResponseProto);
+  
+  rpc doPreUpgrade(DoPreUpgradeRequestProto) returns (DoPreUpgradeResponseProto);
+  
+  rpc doUpgrade(DoUpgradeRequestProto) returns (DoUpgradeResponseProto);
+
+  rpc doFinalize(DoFinalizeRequestProto) returns (DoFinalizeResponseProto);
+
+  rpc canRollBack(CanRollBackRequestProto) returns (CanRollBackResponseProto);
+
+  rpc doRollback(DoRollbackRequestProto) returns (DoRollbackResponseProto);
 
   rpc getJournalState(GetJournalStateRequestProto) returns (GetJournalStateResponseProto);
 

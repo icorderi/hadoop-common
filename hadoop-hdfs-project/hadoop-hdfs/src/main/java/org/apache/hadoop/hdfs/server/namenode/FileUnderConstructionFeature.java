@@ -26,10 +26,10 @@ import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 
 /**
- * I-node for file being written.
+ * Feature for under-construction file.
  */
 @InterfaceAudience.Private
-public class FileUnderConstructionFeature extends INodeFile.Feature {
+public class FileUnderConstructionFeature implements INode.Feature {
   private String clientName; // lease holder
   private final String clientMachine;
   // if client is a cluster node too.

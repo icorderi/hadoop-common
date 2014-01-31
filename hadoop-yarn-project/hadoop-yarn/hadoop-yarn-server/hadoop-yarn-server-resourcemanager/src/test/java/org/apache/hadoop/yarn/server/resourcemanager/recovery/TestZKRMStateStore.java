@@ -44,7 +44,11 @@ import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.ClientRMService;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.RMStateVersion;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.RMStateVersionPBImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
 import org.junit.Test;
 
 public class TestZKRMStateStore extends RMStateStoreTestBase {
@@ -54,7 +58,8 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
   class TestZKRMStateStoreTester implements RMStateStoreHelper {
 
     ZooKeeper client;
-    ZKRMStateStore store;
+    TestZKRMStateStoreInternal store;
+    String workingZnode;
 
     class TestZKRMStateStoreInternal extends ZKRMStateStore {
 
@@ -69,12 +74,25 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
       public ZooKeeper getNewZooKeeper() throws IOException {
         return client;
       }
+
+      public String getVersionNode() {
+        return znodeWorkingPath + "/" + ROOT_ZNODE_NAME + "/" + VERSION_NODE;
+      }
+
+      public RMStateVersion getCurrentVersion() {
+        return CURRENT_VERSION_INFO;
+      }
+
+      public String getAppNode(String appId) {
+        return workingZnode + "/" + ROOT_ZNODE_NAME + "/" + RM_APP_ROOT + "/"
+            + appId;
+      }
     }
 
     public RMStateStore getRMStateStore() throws Exception {
-      String workingZnode = "/Test";
-      Configuration conf = new YarnConfiguration();
-      conf.set(YarnConfiguration.ZK_RM_STATE_STORE_ADDRESS, hostPort);
+      YarnConfiguration conf = new YarnConfiguration();
+      workingZnode = "/Test";
+      conf.set(YarnConfiguration.RM_ZK_ADDRESS, hostPort);
       conf.set(YarnConfiguration.ZK_RM_STATE_STORE_PARENT_PATH, workingZnode);
       this.client = createClient();
       this.store = new TestZKRMStateStoreInternal(conf, workingZnode);
@@ -86,13 +104,33 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
       List<String> nodes = client.getChildren(store.znodeWorkingPath, false);
       return nodes.size() == 1;
     }
+
+    @Override
+    public void writeVersion(RMStateVersion version) throws Exception {
+      client.setData(store.getVersionNode(), ((RMStateVersionPBImpl) version)
+        .getProto().toByteArray(), -1);
+    }
+
+    @Override
+    public RMStateVersion getCurrentVersion() throws Exception {
+      return store.getCurrentVersion();
+    }
+
+    public boolean appExists(RMApp app) throws Exception {
+      Stat node =
+          client.exists(store.getAppNode(app.getApplicationId().toString()),
+            false);
+      return node !=null;
+    }
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testZKRMStateStoreRealZK() throws Exception {
     TestZKRMStateStoreTester zkTester = new TestZKRMStateStoreTester();
     testRMAppStateStore(zkTester);
     testRMDTSecretManagerStateStore(zkTester);
+    testCheckVersion(zkTester);
+    testAppDeletion(zkTester);
   }
 
   private Configuration createHARMConf(
@@ -102,12 +140,15 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
     conf.set(YarnConfiguration.RM_HA_IDS, rmIds);
     conf.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
     conf.set(YarnConfiguration.RM_STORE, ZKRMStateStore.class.getName());
-    conf.set(YarnConfiguration.ZK_RM_STATE_STORE_ADDRESS, hostPort);
+    conf.set(YarnConfiguration.RM_ZK_ADDRESS, hostPort);
     conf.set(YarnConfiguration.RM_HA_ID, rmId);
-    for (String rpcAddress : YarnConfiguration.RM_RPC_ADDRESS_CONF_KEYS) {
-      conf.set(HAUtil.addSuffix(rpcAddress, rmId), "localhost:0");
+    for (String rpcAddress : YarnConfiguration.RM_SERVICES_ADDRESS_CONF_KEYS) {
+      for (String id : HAUtil.getRMHAIds(conf)) {
+        conf.set(HAUtil.addSuffix(rpcAddress, id), "localhost:0");
+      }
     }
-    conf.set(YarnConfiguration.RM_HA_ADMIN_ADDRESS, "localhost:" + adminPort);
+    conf.set(HAUtil.addSuffix(YarnConfiguration.RM_ADMIN_ADDRESS, rmId),
+        "localhost:" + adminPort);
     return conf;
   }
 
@@ -121,23 +162,23 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
     ResourceManager rm1 = new ResourceManager();
     rm1.init(conf1);
     rm1.start();
-    rm1.getHAService().transitionToActive(req);
+    rm1.getRMContext().getRMAdminService().transitionToActive(req);
     assertEquals("RM with ZKStore didn't start",
         Service.STATE.STARTED, rm1.getServiceState());
     assertEquals("RM should be Active",
         HAServiceProtocol.HAServiceState.ACTIVE,
-        rm1.getHAService().getServiceStatus().getState());
+        rm1.getRMContext().getRMAdminService().getServiceStatus().getState());
 
     Configuration conf2 = createHARMConf("rm1,rm2", "rm2", 5678);
     ResourceManager rm2 = new ResourceManager();
     rm2.init(conf2);
     rm2.start();
-    rm2.getHAService().transitionToActive(req);
+    rm2.getRMContext().getRMAdminService().transitionToActive(req);
     assertEquals("RM with ZKStore didn't start",
         Service.STATE.STARTED, rm2.getServiceState());
     assertEquals("RM should be Active",
         HAServiceProtocol.HAServiceState.ACTIVE,
-        rm2.getHAService().getServiceStatus().getState());
+        rm2.getRMContext().getRMAdminService().getServiceStatus().getState());
 
     // Submitting an application to RM1 to trigger a state store operation.
     // RM1 should realize that it got fenced and is not the Active RM anymore.
@@ -159,16 +200,16 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
     rmService.submitApplication(SubmitApplicationRequest.newInstance(asc));
 
     for (int i = 0; i < 30; i++) {
-      if (HAServiceProtocol.HAServiceState.ACTIVE == rm1.getHAService()
-          .getServiceStatus().getState()) {
+      if (HAServiceProtocol.HAServiceState.ACTIVE ==
+          rm1.getRMContext().getRMAdminService().getServiceStatus().getState()) {
         Thread.sleep(100);
       }
     }
     assertEquals("RM should have been fenced",
         HAServiceProtocol.HAServiceState.STANDBY,
-        rm1.getHAService().getServiceStatus().getState());
+        rm1.getRMContext().getRMAdminService().getServiceStatus().getState());
     assertEquals("RM should be Active",
         HAServiceProtocol.HAServiceState.ACTIVE,
-        rm2.getHAService().getServiceStatus().getState());
+        rm2.getRMContext().getRMAdminService().getServiceStatus().getState());
   }
 }

@@ -619,6 +619,14 @@
 </property>
 
 <property>
+  <name>ipc.client.connect.retry.interval</name>
+  <value>1000</value>
+  <description>Indicates the number of milliseconds a client will wait for
+    before retrying to establish a server connection.
+  </description>
+</property>
+
+<property>
   <name>ipc.client.connect.timeout</name>
   <value>20000</value>
   <description>Indicates the number of milliseconds a client will wait for the 
@@ -1125,9 +1133,7 @@
   <name>hadoop.ssl.enabled</name>
   <value>false</value>
   <description>
-    Whether to use SSL for the HTTP endpoints. If set to true, the
-    NameNode, DataNode, ResourceManager, NodeManager, HistoryServer and
-    MapReduceAppMaster web UIs will be served over HTTPS instead HTTP.
+    Deprecated. Use dfs.http.policy and yarn.http.policy instead.
   </description>
 </property>
 
@@ -1253,6 +1259,42 @@
   <value>4242</value>
   <description>
       Specify the port number used by Hadoop mount daemon.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.user.group.static.mapping.overrides</name>
+  <value>dr.who=;</value>
+  <description>
+    Static mapping of user to groups. This will override the groups if
+    available in the system for the specified user. In otherwords, groups
+    look-up will not happen for these users, instead groups mapped in this
+    configuration will be used.
+    Mapping should be in this format.
+    user1=group1,group2;user2=;user3=group2;
+    Default, "dr.who=;" will consider "dr.who" as user without groups.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.quantile.enable</name>
+  <value>false</value>
+  <description>
+    Setting this property to true and rpc.metrics.percentiles.intervals
+    to a comma-separated list of the granularity in seconds, the
+    50/75/90/95/99th percentile latency for rpc queue/processing time in
+    milliseconds are added to rpc metrics.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.percentiles.intervals</name>
+  <value></value>
+  <description>
+    A comma-separated list of the granularity in seconds for the metrics which
+    describe the 50/75/90/95/99th percentile latency for rpc queue/processing
+    time. The metrics are outputted if rpc.metrics.quantile.enable is set to
+    true.
   </description>
 </property>
 </configuration>

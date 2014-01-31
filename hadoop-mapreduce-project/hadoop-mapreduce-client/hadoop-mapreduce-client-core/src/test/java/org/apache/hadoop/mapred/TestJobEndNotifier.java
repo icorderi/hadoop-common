@@ -34,10 +34,10 @@ import javax.servlet.http.HttpServletResponse;
 import junit.framework.TestCase;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 
 public class TestJobEndNotifier extends TestCase {
-  HttpServer server;
+  HttpServer2 server;
   URL baseUrl;
 
   @SuppressWarnings("serial")
@@ -102,13 +102,14 @@ public class TestJobEndNotifier extends TestCase {
   public void setUp() throws Exception {
     new File(System.getProperty("build.webapps", "build/webapps") + "/test"
         ).mkdirs();
-    server = new HttpServer.Builder().setName("test")
-        .setBindAddress("0.0.0.0").setPort(0).setFindPort(true).build();
+    server = new HttpServer2.Builder().setName("test")
+        .addEndpoint(URI.create("http://localhost:0"))
+        .setFindPort(true).build();
     server.addServlet("delay", "/delay", DelayServlet.class);
     server.addServlet("jobend", "/jobend", JobEndServlet.class);
     server.addServlet("fail", "/fail", FailServlet.class);
     server.start();
-    int port = server.getPort();
+    int port = server.getConnectorAddress(0).getPort();
     baseUrl = new URL("http://localhost:" + port + "/");
 
     JobEndServlet.calledTimes = 0;

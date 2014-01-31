@@ -325,11 +325,24 @@ public class StringUtils {
    * @return an <code>ArrayList</code> of string values
    */
   public static Collection<String> getStringCollection(String str){
+    String delim = ",";
+    return getStringCollection(str, delim);
+  }
+
+  /**
+   * Returns a collection of strings.
+   * 
+   * @param str
+   *          String to parse
+   * @param delim
+   *          delimiter to separate the values
+   * @return Collection of parsed elements.
+   */
+  public static Collection<String> getStringCollection(String str, String delim) {
     List<String> values = new ArrayList<String>();
     if (str == null)
       return values;
-    StringTokenizer tokenizer = new StringTokenizer (str,",");
-    values = new ArrayList<String>();
+    StringTokenizer tokenizer = new StringTokenizer(str, delim);
     while (tokenizer.hasMoreTokens()) {
       values.add(tokenizer.nextToken());
     }
@@ -914,8 +927,10 @@ public class StringUtils {
    * @param args  List of arguments.
    * @return      null if the option was not found; the value of the 
    *              option otherwise.
+   * @throws IllegalArgumentException if the option's argument is not present
    */
-  public static String popOptionWithArgument(String name, List<String> args) {
+  public static String popOptionWithArgument(String name, List<String> args)
+      throws IllegalArgumentException {
     String val = null;
     for (Iterator<String> iter = args.iterator(); iter.hasNext(); ) {
       String cur = iter.next();
@@ -925,7 +940,7 @@ public class StringUtils {
       } else if (cur.equals(name)) {
         iter.remove();
         if (!iter.hasNext()) {
-          throw new RuntimeException("option " + name + " requires 1 " +
+          throw new IllegalArgumentException("option " + name + " requires 1 " +
               "argument.");
         }
         val = iter.next();

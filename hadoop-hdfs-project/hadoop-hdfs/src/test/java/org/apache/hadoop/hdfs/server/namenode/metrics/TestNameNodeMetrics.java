@@ -47,6 +47,8 @@ import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+import org.apache.hadoop.metrics2.MetricsSource;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.test.MetricsAsserts;
 import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
@@ -108,6 +110,12 @@ public class TestNameNodeMetrics {
   
   @After
   public void tearDown() throws Exception {
+    MetricsSource source = DefaultMetricsSystem.instance().getSource("UgiMetrics");
+    if (source != null) {
+      // Run only once since the UGI metrics is cleaned up during teardown
+      MetricsRecordBuilder rb = getMetrics(source);
+      assertQuantileGauges("GetGroups1s", rb);
+    }
     cluster.shutdown();
   }
   
@@ -228,7 +236,7 @@ public class TestNameNodeMetrics {
     cluster.getNamesystem().writeLock();
     try {
       bm.findAndMarkBlockAsCorrupt(block.getBlock(), block.getLocations()[0],
-          "TEST");
+          "STORAGE_ID", "TEST");
     } finally {
       cluster.getNamesystem().writeUnlock();
     }
@@ -279,7 +287,7 @@ public class TestNameNodeMetrics {
     cluster.getNamesystem().writeLock();
     try {
       bm.findAndMarkBlockAsCorrupt(block.getBlock(), block.getLocations()[0],
-          "TEST");
+          "STORAGE_ID", "TEST");
     } finally {
       cluster.getNamesystem().writeUnlock();
     }
@@ -434,7 +442,8 @@ public class TestNameNodeMetrics {
     // We have one sync when the cluster starts up, just opening the journal
     assertCounter("SyncsNumOps", 1L, rb);
     // Each datanode reports in when the cluster comes up
-    assertCounter("BlockReportNumOps", (long)DATANODE_COUNT, rb);
+    assertCounter("BlockReportNumOps",
+                  (long)DATANODE_COUNT*MiniDFSCluster.DIRS_PER_DATANODE, rb);
     
     // Sleep for an interval+slop to let the percentiles rollover
     Thread.sleep((PERCENTILES_INTERVAL+1)*1000);

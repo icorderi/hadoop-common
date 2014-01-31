@@ -24,9 +24,13 @@ public enum RMAppEventType {
   RECOVER,
   KILL,
 
-  // Source: RMAppAttempt
+  // Source: Scheduler and RMAppManager
   APP_REJECTED,
+
+  // Source: Scheduler
   APP_ACCEPTED,
+
+  // Source: RMAppAttempt
   ATTEMPT_REGISTERED,
   ATTEMPT_UNREGISTERED,
   ATTEMPT_FINISHED, // Will send the final state
@@ -37,5 +41,4 @@ public enum RMAppEventType {
   // Source: RMStateStore
   APP_NEW_SAVED,
   APP_UPDATE_SAVED,
-  APP_REMOVED
 }

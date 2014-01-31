@@ -80,7 +80,13 @@ public class QueuePlacementPolicy {
       Node node = elements.item(i);
       if (node instanceof Element) {
         Element element = (Element)node;
-        String ruleName = element.getTagName();
+
+        String ruleName = element.getAttribute("name");
+        if ("".equals(ruleName)) {
+          throw new AllocationConfigurationException("No name provided for a " +
+            "rule element");
+        }
+
         Class<? extends QueuePlacementRule> clazz = ruleClasses.get(ruleName);
         if (clazz == null) {
           throw new AllocationConfigurationException("No rule class found for "
@@ -94,6 +100,34 @@ public class QueuePlacementPolicy {
     return new QueuePlacementPolicy(rules, configuredQueues, conf);
   }
   
+  /**
+   * Build a simple queue placement policy from the allow-undeclared-pools and
+   * user-as-default-queue configuration options.
+   */
+  public static QueuePlacementPolicy fromConfiguration(Configuration conf,
+      Set<String> configuredQueues) {
+    boolean create = conf.getBoolean(
+        FairSchedulerConfiguration.ALLOW_UNDECLARED_POOLS,
+        FairSchedulerConfiguration.DEFAULT_ALLOW_UNDECLARED_POOLS);
+    boolean userAsDefaultQueue = conf.getBoolean(
+        FairSchedulerConfiguration.USER_AS_DEFAULT_QUEUE,
+        FairSchedulerConfiguration.DEFAULT_USER_AS_DEFAULT_QUEUE);
+    List<QueuePlacementRule> rules = new ArrayList<QueuePlacementRule>();
+    rules.add(new QueuePlacementRule.Specified().initialize(create, null));
+    if (userAsDefaultQueue) {
+      rules.add(new QueuePlacementRule.User().initialize(create, null));
+    }
+    if (!userAsDefaultQueue || !create) {
+      rules.add(new QueuePlacementRule.Default().initialize(true, null));
+    }
+    try {
+      return new QueuePlacementPolicy(rules, configuredQueues, conf);
+    } catch (AllocationConfigurationException ex) {
+      throw new RuntimeException("Should never hit exception when loading" +
+      		"placement policy from conf", ex);
+    }
+  }
+
   /**
    * Applies this rule to an app with the given requested queue and user/group
    * information.
@@ -119,5 +153,9 @@ public class QueuePlacementPolicy {
     }
     throw new IllegalStateException("Should have applied a rule before " +
     		"reaching here");
+  }
+  
+  public List<QueuePlacementRule> getRules() {
+    return rules;
   }
 }

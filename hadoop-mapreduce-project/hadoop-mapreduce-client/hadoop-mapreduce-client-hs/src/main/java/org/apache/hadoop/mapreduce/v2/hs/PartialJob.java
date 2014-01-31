@@ -53,7 +53,8 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
     this.jobIndexInfo = jobIndexInfo;
     this.jobId = jobId;
     jobReport = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(JobReport.class);
-    jobReport.setStartTime(jobIndexInfo.getSubmitTime());
+    jobReport.setSubmitTime(jobIndexInfo.getSubmitTime());
+    jobReport.setStartTime(jobIndexInfo.getJobStartTime());
     jobReport.setFinishTime(jobIndexInfo.getFinishTime());
     jobReport.setJobState(getState());
   }
@@ -188,6 +189,11 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
   @Override
   public List<AMInfo> getAMInfos() {
     return null;
+  }
+  
+  @Override
+  public void setQueueName(String queueName) {
+    throw new UnsupportedOperationException("Can't set job's queue name in history");
   }
 
 }

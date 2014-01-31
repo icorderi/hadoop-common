@@ -22,6 +22,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import java.io.IOException;
 import java.net.ConnectException;
+import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -34,9 +35,8 @@ import javax.servlet.http.HttpServlet;
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.security.AdminACLsManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -216,46 +216,36 @@ public class WebApps {
             System.exit(1);
           }
         }
-        HttpServer server =
-            new HttpServer(name, bindAddress, port, findPort, conf,
-                new AdminACLsManager(conf).getAdminAcl(), null,
-                pathList.toArray(new String[0])) {
+        HttpServer2.Builder builder = new HttpServer2.Builder().setName(name)
+            .addEndpoint(URI.create("http://" + bindAddress + ":" + port))
+            .setConf(conf).setFindPort(findPort)
+            .setACL(new AdminACLsManager(conf).getAdminAcl())
+            .setPathSpec(pathList.toArray(new String[0]));
 
-              {
-                if (UserGroupInformation.isSecurityEnabled()) {
-                  boolean initSpnego = true;
-                  if (spnegoPrincipalKey == null
-                      || conf.get(spnegoPrincipalKey, "").isEmpty()) {
-                    LOG.warn("Principal for spnego filter is not set");
-                    initSpnego = false;
-                  }
-                  if (spnegoKeytabKey == null
-                      || conf.get(spnegoKeytabKey, "").isEmpty()) {
-                    LOG.warn("Keytab for spnego filter is not set");
-                    initSpnego = false;
-                  }
-                  if (initSpnego) {
-                    LOG.info("Initializing spnego filter with principal key : "
-                        + spnegoPrincipalKey + " keytab key : "
-                        + spnegoKeytabKey);
-                    initSpnego(conf, spnegoPrincipalKey, spnegoKeytabKey);
-                  }
-                }
-              }
-            };
+        boolean hasSpnegoConf = spnegoPrincipalKey != null
+            && conf.get(spnegoPrincipalKey) != null && spnegoKeytabKey != null
+            && conf.get(spnegoKeytabKey) != null;
+
+        if (hasSpnegoConf) {
+          builder.setUsernameConfKey(spnegoPrincipalKey)
+              .setKeytabConfKey(spnegoKeytabKey)
+              .setSecurityEnabled(UserGroupInformation.isSecurityEnabled());
+        }
+        HttpServer2 server = builder.build();
+
         for(ServletStruct struct: servlets) {
           server.addServlet(struct.name, struct.spec, struct.clazz);
         }
         for(Map.Entry<String, Object> entry : attributes.entrySet()) {
           server.setAttribute(entry.getKey(), entry.getValue());
         }
-        server.defineFilter(server.getWebAppContext(), "guice",
+        HttpServer2.defineFilter(server.getWebAppContext(), "guice",
           GuiceFilter.class.getName(), null, new String[] { "/*" });
 
         webapp.setConf(conf);
         webapp.setHttpServer(server);
         server.start();
-        LOG.info("Web app /"+ name +" started at "+ server.getPort());
+        LOG.info("Web app /"+ name +" started at "+ server.getConnectorAddress(0).getPort());
       } catch (ClassNotFoundException e) {
         throw new WebAppException("Error starting http server", e);
       } catch (IOException e) {

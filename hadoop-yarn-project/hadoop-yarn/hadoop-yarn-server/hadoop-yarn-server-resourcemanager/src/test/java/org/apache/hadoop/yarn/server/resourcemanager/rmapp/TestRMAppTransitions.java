@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.rmapp;
 
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -49,6 +50,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMAppManagerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAppManagerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContextImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.ApplicationState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
@@ -83,6 +85,7 @@ public class TestRMAppTransitions {
   private static int appId = 1;
   private DrainDispatcher rmDispatcher;
   private RMStateStore store;
+  private RMApplicationHistoryWriter writer;
   private YarnScheduler scheduler;
 
   // ignore all the RM application attempt events
@@ -178,13 +181,16 @@ public class TestRMAppTransitions {
     AMLivelinessMonitor amLivelinessMonitor = mock(AMLivelinessMonitor.class);
     AMLivelinessMonitor amFinishingMonitor = mock(AMLivelinessMonitor.class);
     store = mock(RMStateStore.class);
+    writer = mock(RMApplicationHistoryWriter.class);
     this.rmContext =
-        new RMContextImpl(rmDispatcher, store,
+        new RMContextImpl(rmDispatcher,
           containerAllocationExpirer, amLivelinessMonitor, amFinishingMonitor,
           null, new AMRMTokenSecretManager(conf),
           new RMContainerTokenSecretManager(conf),
           new NMTokenSecretManagerInRM(conf),
-          new ClientToAMTokenSecretManagerInRM());
+          new ClientToAMTokenSecretManagerInRM(),
+          writer);
+    ((RMContextImpl)rmContext).setStateStore(store);
 
     rmDispatcher.register(RMAppAttemptEventType.class,
         new TestApplicationAttemptEventDispatcher(this.rmContext));
@@ -280,13 +286,17 @@ public class TestRMAppTransitions {
   private void assertTimesAtFinish(RMApp application) {
     assertStartTimeSet(application);
     Assert.assertTrue("application finish time is not greater then 0",
-        (application.getFinishTime() > 0)); 
+        (application.getFinishTime() > 0));
     Assert.assertTrue("application finish time is not >= then start time",
         (application.getFinishTime() >= application.getStartTime()));
   }
 
   private void assertAppFinalStateSaved(RMApp application){
     verify(store, times(1)).updateApplicationState(any(ApplicationState.class));
+  }
+
+  private void assertAppFinalStateNotSaved(RMApp application){
+    verify(store, times(0)).updateApplicationState(any(ApplicationState.class));
   }
 
   private void assertKilled(RMApp application) {
@@ -300,12 +310,9 @@ public class TestRMAppTransitions {
 
   private void assertAppAndAttemptKilled(RMApp application)
       throws InterruptedException {
+    sendAttemptUpdateSavedEvent(application);
     sendAppUpdateSavedEvent(application);
     assertKilled(application);
-    // send attempt final state saved event.
-    application.getCurrentAppAttempt().handle(
-      new RMAppAttemptUpdateSavedEvent(application.getCurrentAppAttempt()
-        .getAppAttemptId(), null));
     Assert.assertEquals(RMAppAttemptState.KILLED, application
       .getCurrentAppAttempt().getAppAttemptState());
     assertAppFinalStateSaved(application);
@@ -318,7 +325,6 @@ public class TestRMAppTransitions {
     StringBuilder diag = application.getDiagnostics();
     Assert.assertTrue("application diagnostics is not correct",
         diag.toString().matches(regex));
-    assertAppFinalStateSaved(application);
   }
 
   private void sendAppUpdateSavedEvent(RMApp application) {
@@ -328,9 +334,16 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
   }
 
+  private void sendAttemptUpdateSavedEvent(RMApp application) {
+    application.getCurrentAppAttempt().handle(
+      new RMAppAttemptUpdateSavedEvent(application.getCurrentAppAttempt()
+        .getAppAttemptId(), null));
+  }
+
   protected RMApp testCreateAppNewSaving(
       ApplicationSubmissionContext submissionContext) throws IOException {
   RMApp application = createNewTestApp(submissionContext);
+    verify(writer).applicationStarted(any(RMApp.class));
     // NEW => NEW_SAVING event RMAppEventType.START
     RMAppEvent event = 
         new RMAppEvent(application.getApplicationId(), RMAppEventType.START);
@@ -452,11 +465,14 @@ public class TestRMAppTransitions {
     Assert.assertTrue("Finished app missing diagnostics",
         application.getDiagnostics().indexOf(diagMsg) != -1);
 
+    // reset the counter of Mockito.verify
+    reset(writer);
+
     // test app fails after 1 app attempt failure
     LOG.info("--- START: testUnmanagedAppFailPath ---");
     application = testCreateAppRunning(subContext);
     RMAppEvent event = new RMAppFailedAttemptEvent(
-        application.getApplicationId(), RMAppEventType.ATTEMPT_FAILED, "");
+        application.getApplicationId(), RMAppEventType.ATTEMPT_FAILED, "", false);
     application.handle(event);
     rmDispatcher.await();
     RMAppAttempt appAttempt = application.getCurrentAppAttempt();
@@ -464,6 +480,7 @@ public class TestRMAppTransitions {
     sendAppUpdateSavedEvent(application);
     assertFailed(application,
         ".*Unmanaged application.*Failing the application.*");
+    assertAppFinalStateSaved(application);
   }
   
   @Test
@@ -493,6 +510,8 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertKilled(application);
+    assertAppFinalStateNotSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -508,6 +527,8 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertFailed(application, rejectedText);
+    assertAppFinalStateNotSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test (timeout = 30000)
@@ -522,6 +543,7 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertKilled(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test (timeout = 30000)
@@ -537,6 +559,8 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertFailed(application, rejectedText);
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test (timeout = 30000)
@@ -552,6 +576,8 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertFailed(application, rejectedText);
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -563,7 +589,10 @@ public class TestRMAppTransitions {
         RMAppEventType.KILL);
     application.handle(event);
     rmDispatcher.await();
-    assertAppAndAttemptKilled(application);
+    sendAppUpdateSavedEvent(application);
+    assertKilled(application);
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -576,9 +605,9 @@ public class TestRMAppTransitions {
     for (int i=1; i < maxAppAttempts; i++) {
       RMAppEvent event = 
           new RMAppFailedAttemptEvent(application.getApplicationId(), 
-              RMAppEventType.ATTEMPT_FAILED, "");
+              RMAppEventType.ATTEMPT_FAILED, "", false);
       application.handle(event);
-      assertAppState(RMAppState.SUBMITTED, application);
+      assertAppState(RMAppState.ACCEPTED, application);
       event = 
           new RMAppEvent(application.getApplicationId(), 
               RMAppEventType.APP_ACCEPTED);
@@ -592,11 +621,13 @@ public class TestRMAppTransitions {
     String message = "Test fail";
     RMAppEvent event = 
         new RMAppFailedAttemptEvent(application.getApplicationId(), 
-            RMAppEventType.ATTEMPT_FAILED, message);
+            RMAppEventType.ATTEMPT_FAILED, message, false);
     application.handle(event);
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertFailed(application, ".*" + message + ".*Failing the application.*");
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -608,7 +639,10 @@ public class TestRMAppTransitions {
         RMAppEventType.KILL);
     application.handle(event);
     rmDispatcher.await();
-    assertAppAndAttemptKilled(application);
+    sendAppUpdateSavedEvent(application);
+    assertKilled(application);
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -623,13 +657,15 @@ public class TestRMAppTransitions {
     rmDispatcher.await();
 
     // Ignore Attempt_Finished if we were supposed to go to Finished.
-    assertAppState(RMAppState.FINAL_SAVING, application);
+    assertAppState(RMAppState.KILLING, application);
     RMAppEvent finishEvent =
         new RMAppFinishedAttemptEvent(application.getApplicationId(), null);
     application.handle(finishEvent);
-    assertAppState(RMAppState.FINAL_SAVING, application);
+    assertAppState(RMAppState.KILLING, application);
+    sendAttemptUpdateSavedEvent(application);
     sendAppUpdateSavedEvent(application);
     assertKilled(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
@@ -646,10 +682,10 @@ public class TestRMAppTransitions {
     for (int i=1; i<maxAppAttempts; i++) {
       RMAppEvent event = 
           new RMAppFailedAttemptEvent(application.getApplicationId(), 
-              RMAppEventType.ATTEMPT_FAILED, "");
+              RMAppEventType.ATTEMPT_FAILED, "", false);
       application.handle(event);
       rmDispatcher.await();
-      assertAppState(RMAppState.SUBMITTED, application);
+      assertAppState(RMAppState.ACCEPTED, application);
       appAttempt = application.getCurrentAppAttempt();
       Assert.assertEquals(++expectedAttemptId, 
           appAttempt.getAppAttemptId().getAttemptId());
@@ -671,22 +707,25 @@ public class TestRMAppTransitions {
     // after max application attempts
     RMAppEvent event = 
         new RMAppFailedAttemptEvent(application.getApplicationId(), 
-            RMAppEventType.ATTEMPT_FAILED, "");
+            RMAppEventType.ATTEMPT_FAILED, "", false);
     application.handle(event);
     rmDispatcher.await();
     sendAppUpdateSavedEvent(application);
     assertFailed(application, ".*Failing the application.*");
+    assertAppFinalStateSaved(application);
 
     // FAILED => FAILED event RMAppEventType.KILL
     event = new RMAppEvent(application.getApplicationId(), RMAppEventType.KILL);
     application.handle(event);
     rmDispatcher.await();
     assertFailed(application, ".*Failing the application.*");
+    assertAppFinalStateSaved(application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test
-  public void testAppFinishingKill() throws IOException {
-    LOG.info("--- START: testAppFinishedFinished ---");
+  public void testAppAtFinishingIgnoreKill() throws IOException {
+    LOG.info("--- START: testAppAtFinishingIgnoreKill ---");
 
     RMApp application = testCreateAppFinishing(null);
     // FINISHING => FINISHED event RMAppEventType.KILL
@@ -694,7 +733,7 @@ public class TestRMAppTransitions {
         new RMAppEvent(application.getApplicationId(), RMAppEventType.KILL);
     application.handle(event);
     rmDispatcher.await();
-    assertAppState(RMAppState.FINISHED, application);
+    assertAppState(RMAppState.FINISHING, application);
   }
 
   // While App is at FINAL_SAVING, Attempt_Finished event may come before
@@ -739,6 +778,7 @@ public class TestRMAppTransitions {
     StringBuilder diag = application.getDiagnostics();
     Assert.assertEquals("application diagnostics is not correct",
         "", diag.toString());
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test (timeout = 30000)
@@ -766,6 +806,7 @@ public class TestRMAppTransitions {
 
     assertTimesAtFinish(application);
     assertAppState(RMAppState.FAILED, application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test (timeout = 30000)
@@ -779,6 +820,7 @@ public class TestRMAppTransitions {
         new RMAppEvent(application.getApplicationId(), RMAppEventType.KILL);
     application.handle(event);
     rmDispatcher.await();
+    sendAttemptUpdateSavedEvent(application);
     sendAppUpdateSavedEvent(application);
     assertTimesAtFinish(application);
     assertAppState(RMAppState.KILLED, application);
@@ -794,20 +836,12 @@ public class TestRMAppTransitions {
     // KILLED => KILLED event RMAppEventType.ATTEMPT_FAILED
     event = 
         new RMAppFailedAttemptEvent(application.getApplicationId(), 
-            RMAppEventType.ATTEMPT_FAILED, "");
+            RMAppEventType.ATTEMPT_FAILED, "", false);
     application.handle(event);
     rmDispatcher.await();
     assertTimesAtFinish(application);
     assertAppState(RMAppState.KILLED, application);
 
-    // KILLED => KILLED event RMAppEventType.ATTEMPT_KILLED
-    event = 
-        new RMAppEvent(application.getApplicationId(), 
-            RMAppEventType.ATTEMPT_KILLED);
-    application.handle(event);
-    rmDispatcher.await();
-    assertTimesAtFinish(application);
-    assertAppState(RMAppState.KILLED, application);
 
     // KILLED => KILLED event RMAppEventType.KILL
     event = new RMAppEvent(application.getApplicationId(), RMAppEventType.KILL);
@@ -818,6 +852,7 @@ public class TestRMAppTransitions {
 
     assertTimesAtFinish(application);
     assertAppState(RMAppState.KILLED, application);
+    verify(writer).applicationFinished(any(RMApp.class));
   }
 
   @Test

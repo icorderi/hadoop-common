@@ -49,6 +49,7 @@ import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterRespo
 import org.apache.hadoop.yarn.api.records.AMCommand;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.PreemptionContainer;
@@ -78,6 +79,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAt
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptStatusupdateEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptUnregistrationEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
@@ -265,12 +267,18 @@ public class ApplicationMasterService extends AbstractService implements
           .getMaximumResourceCapability());
       response.setApplicationACLs(app.getRMAppAttempt(applicationAttemptId)
           .getSubmissionContext().getAMContainerSpec().getApplicationACLs());
+      response.setQueue(app.getQueue());
       if (UserGroupInformation.isSecurityEnabled()) {
         LOG.info("Setting client token master key");
         response.setClientToAMTokenMasterKey(java.nio.ByteBuffer.wrap(rmContext
             .getClientToAMTokenSecretManager()
             .getMasterKey(applicationAttemptId).getEncoded()));        
       }
+
+      List<Container> containerList =
+          ((AbstractYarnScheduler) rScheduler)
+            .getTransferredContainers(applicationAttemptId);
+      response.setContainersFromPreviousAttempt(containerList);
       return response;
     }
   }
@@ -292,15 +300,28 @@ public class ApplicationMasterService extends AbstractService implements
       
       this.amLivelinessMonitor.receivedPing(applicationAttemptId);
 
-      rmContext.getDispatcher().getEventHandler().handle(
+      RMApp rmApp =
+          rmContext.getRMApps().get(applicationAttemptId.getApplicationId());
+
+      if (rmApp.getApplicationSubmissionContext().getUnmanagedAM()) {
+        // No recovery supported yet for unmanaged AM. Send the unregister event
+        // and (falsely) acknowledge state-store write immediately.
+        rmContext.getDispatcher().getEventHandler().handle(
           new RMAppAttemptUnregistrationEvent(applicationAttemptId, request
               .getTrackingUrl(), request.getFinalApplicationStatus(), request
               .getDiagnostics()));
+        return FinishApplicationMasterResponse.newInstance(true);
+      }
 
-      if (rmContext.getRMApps().get(applicationAttemptId.getApplicationId())
-          .isAppSafeToUnregister()) {
+      // Not an unmanaged-AM.
+      if (rmApp.isAppSafeToTerminate()) {
         return FinishApplicationMasterResponse.newInstance(true);
       } else {
+        // keep sending the unregister event as RM may crash in the meanwhile.
+        rmContext.getDispatcher().getEventHandler().handle(
+          new RMAppAttemptUnregistrationEvent(applicationAttemptId, request
+              .getTrackingUrl(), request.getFinalApplicationStatus(), request
+              .getDiagnostics()));
         return FinishApplicationMasterResponse.newInstance(false);
       }
     }
@@ -408,21 +429,26 @@ public class ApplicationMasterService extends AbstractService implements
         LOG.warn("Invalid blacklist request by application " + appAttemptId, e);
         throw e;
       }
-      
-      try {
-        RMServerUtils.validateContainerReleaseRequest(release, appAttemptId);
-      } catch (InvalidContainerReleaseException e) {
-        LOG.warn("Invalid container release by application " + appAttemptId, e);
-        throw e;
+
+      RMApp app =
+          this.rmContext.getRMApps().get(appAttemptId.getApplicationId());
+      // In the case of work-preserving AM restart, it's possible for the
+      // AM to release containers from the earlier attempt.
+      if (!app.getApplicationSubmissionContext()
+        .getKeepContainersAcrossApplicationAttempts()) {
+        try {
+          RMServerUtils.validateContainerReleaseRequest(release, appAttemptId);
+        } catch (InvalidContainerReleaseException e) {
+          LOG.warn("Invalid container release by application " + appAttemptId, e);
+          throw e;
+        }
       }
-      
+
       // Send new requests to appAttempt.
       Allocation allocation =
           this.rScheduler.allocate(appAttemptId, ask, release, 
               blacklistAdditions, blacklistRemovals);
 
-      RMApp app = this.rmContext.getRMApps().get(
-          appAttemptId.getApplicationId());
       RMAppAttempt appAttempt = app.getRMAppAttempt(appAttemptId);
       
       AllocateResponse allocateResponse =

@@ -18,12 +18,16 @@
 package org.apache.hadoop.hdfs.server.datanode;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.DataOutputStream;
 import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.nio.channels.ClosedChannelException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -40,6 +44,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.util.DataChecksum;
 import org.junit.After;
@@ -186,14 +191,25 @@ public class TestDiskError {
     // Check permissions on directories in 'dfs.datanode.data.dir'
     FileSystem localFS = FileSystem.getLocal(conf);
     for (DataNode dn : cluster.getDataNodes()) {
-      String[] dataDirs =
-        dn.getConf().getStrings(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY);
-      for (String dir : dataDirs) {
+      for (FsVolumeSpi v : dn.getFSDataset().getVolumes()) {
+        String dir = v.getBasePath();
         Path dataDir = new Path(dir);
         FsPermission actual = localFS.getFileStatus(dataDir).getPermission();
           assertEquals("Permission for dir: " + dataDir + ", is " + actual +
               ", while expected is " + expected, expected, actual);
       }
     }
+  }
+  
+  @Test
+  public void testNetworkErrorsIgnored() {
+    DataNode dn = cluster.getDataNodes().iterator().next();
+    
+    assertTrue(dn.isNetworkRelatedException(new SocketException()));
+    assertTrue(dn.isNetworkRelatedException(new SocketTimeoutException()));
+    assertTrue(dn.isNetworkRelatedException(new ClosedChannelException()));
+    assertTrue(dn.isNetworkRelatedException(new Exception("Broken pipe foo bar")));
+    assertFalse(dn.isNetworkRelatedException(new Exception()));
+    assertFalse(dn.isNetworkRelatedException(new Exception("random problem")));
   }
 }

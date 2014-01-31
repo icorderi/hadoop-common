@@ -17,12 +17,6 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_ADMIN;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_DEFAULT;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SECONDARY_NAMENODE_USER_NAME_KEY;
 import static org.apache.hadoop.util.ExitUtil.terminate;
 
 import java.io.File;
@@ -30,6 +24,7 @@ import java.io.FilenameFilter;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URL;
 import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
@@ -69,7 +64,8 @@ import org.apache.hadoop.hdfs.server.namenode.NNStorageRetentionManager.StorageP
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpConfig;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
@@ -77,7 +73,6 @@ import org.apache.hadoop.metrics2.source.JvmMetrics;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
@@ -95,7 +90,7 @@ import com.google.common.collect.ImmutableList;
  * The Secondary NameNode is a daemon that periodically wakes
  * up (determined by the schedule specified in the configuration),
  * triggers a periodic checkpoint and then goes back to sleep.
- * The Secondary NameNode uses the ClientProtocol to talk to the
+ * The Secondary NameNode uses the NamenodeProtocol to talk to the
  * primary NameNode.
  *
  **********************************************************/
@@ -111,16 +106,15 @@ public class SecondaryNameNode implements Runnable {
   private final long starttime = Time.now();
   private volatile long lastCheckpointTime = 0;
 
-  private String fsName;
+  private URL fsName;
   private CheckpointStorage checkpointImage;
 
   private NamenodeProtocol namenode;
   private Configuration conf;
   private InetSocketAddress nameNodeAddr;
   private volatile boolean shouldRun;
-  private HttpServer infoServer;
-  private int infoPort;
-  private String infoBindAddress;
+  private HttpServer2 infoServer;
+  private URL imageListenURL;
 
   private Collection<URI> checkpointDirs;
   private List<URI> checkpointEditsDirs;
@@ -208,28 +202,30 @@ public class SecondaryNameNode implements Runnable {
   
   public static InetSocketAddress getHttpAddress(Configuration conf) {
     return NetUtils.createSocketAddr(conf.get(
-        DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
-        DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_DEFAULT));
+        DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
+        DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_DEFAULT));
   }
   
   /**
    * Initialize SecondaryNameNode.
-   * @param commandLineOpts 
+   * @param commandLineOpts
    */
   private void initialize(final Configuration conf,
       CommandLineOpts commandLineOpts) throws IOException {
     final InetSocketAddress infoSocAddr = getHttpAddress(conf);
-    infoBindAddress = infoSocAddr.getHostName();
+    final String infoBindAddress = infoSocAddr.getHostName();
     UserGroupInformation.setConfiguration(conf);
     if (UserGroupInformation.isSecurityEnabled()) {
-      SecurityUtil.login(conf, DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY,
-          DFS_SECONDARY_NAMENODE_USER_NAME_KEY, infoBindAddress);
+      SecurityUtil.login(conf,
+          DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY,
+          DFSConfigKeys.DFS_SECONDARY_NAMENODE_USER_NAME_KEY, infoBindAddress);
     }
     // initiate Java VM metrics
     DefaultMetricsSystem.initialize("SecondaryNameNode");
     JvmMetrics.create("SecondaryNameNode",
-        conf.get(DFS_METRICS_SESSION_ID_KEY), DefaultMetricsSystem.instance());
-    
+        conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY),
+        DefaultMetricsSystem.instance());
+
     // Create connection to the namenode.
     shouldRun = true;
     nameNodeAddr = NameNode.getServiceAddress(conf, true);
@@ -254,17 +250,20 @@ public class SecondaryNameNode implements Runnable {
     // Initialize other scheduling parameters from the configuration
     checkpointConf = new CheckpointConf(conf);
 
-    // initialize the webserver for uploading files.
-    int tmpInfoPort = infoSocAddr.getPort();
-    infoServer = new HttpServer.Builder().setName("secondary")
-        .setBindAddress(infoBindAddress).setPort(tmpInfoPort)
-        .setFindPort(tmpInfoPort == 0).setConf(conf).setACL(
-            new AccessControlList(conf.get(DFS_ADMIN, " ")))
-        .setSecurityEnabled(UserGroupInformation.isSecurityEnabled())
-        .setUsernameConfKey(
-            DFSConfigKeys.DFS_SECONDARY_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY)
-        .setKeytabConfKey(DFSUtil.getSpnegoKeytabKey(conf,
-            DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY)).build();
+    final InetSocketAddress httpAddr = infoSocAddr;
+
+    final String httpsAddrString = conf.get(
+        DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTPS_ADDRESS_KEY,
+        DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTPS_ADDRESS_DEFAULT);
+    InetSocketAddress httpsAddr = NetUtils.createSocketAddr(httpsAddrString);
+
+    HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
+        httpAddr, httpsAddr, "secondary",
+        DFSConfigKeys.DFS_SECONDARY_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY,
+        DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY);
+
+    infoServer = builder.build();
+
     infoServer.setAttribute("secondary.name.node", this);
     infoServer.setAttribute("name.system.image", checkpointImage);
     infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
@@ -273,14 +272,25 @@ public class SecondaryNameNode implements Runnable {
     infoServer.start();
 
     LOG.info("Web server init done");
+    imageListenURL = new URL(DFSUtil.getHttpClientScheme(conf) + "://"
+        + NetUtils.getHostPortString(infoServer.getConnectorAddress(0)));
 
-    // The web-server port can be ephemeral... ensure we have the correct info
-    infoPort = infoServer.getPort();
+    HttpConfig.Policy policy = DFSUtil.getHttpPolicy(conf);
+    int connIdx = 0;
+    if (policy.isHttpEnabled()) {
+      InetSocketAddress httpAddress = infoServer.getConnectorAddress(connIdx++);
+      conf.set(DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
+          NetUtils.getHostPortString(httpAddress));
+    }
 
-    conf.set(DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY, infoBindAddress + ":" + infoPort);
-    LOG.info("Secondary Web-server up at: " + infoBindAddress + ":" + infoPort);
-    LOG.info("Checkpoint Period   :" + checkpointConf.getPeriod() + " secs " +
-             "(" + checkpointConf.getPeriod() / 60 + " min)");
+    if (policy.isHttpsEnabled()) {
+      InetSocketAddress httpsAddress = infoServer.getConnectorAddress(connIdx);
+      conf.set(DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTPS_ADDRESS_KEY,
+          NetUtils.getHostPortString(httpsAddress));
+    }
+
+    LOG.info("Checkpoint Period   :" + checkpointConf.getPeriod() + " secs "
+        + "(" + checkpointConf.getPeriod() / 60 + " min)");
     LOG.info("Log Size Trigger    :" + checkpointConf.getTxnCount() + " txns");
   }
 
@@ -401,7 +411,7 @@ public class SecondaryNameNode implements Runnable {
    * @throws IOException
    */
   static boolean downloadCheckpointFiles(
-      final String nnHostPort,
+      final URL nnHostPort,
       final FSImage dstImage,
       final CheckpointSignature sig,
       final RemoteEditLogManifest manifest
@@ -464,25 +474,25 @@ public class SecondaryNameNode implements Runnable {
   /**
    * Returns the Jetty server that the Namenode is listening on.
    */
-  private String getInfoServer() throws IOException {
+  private URL getInfoServer() throws IOException {
     URI fsName = FileSystem.getDefaultUri(conf);
     if (!HdfsConstants.HDFS_URI_SCHEME.equalsIgnoreCase(fsName.getScheme())) {
       throw new IOException("This is not a DFS");
     }
 
-    String configuredAddress = DFSUtil.getInfoServer(null, conf, false);
-    String address = DFSUtil.substituteForWildcardAddress(configuredAddress,
-        fsName.getHost());
-    LOG.debug("Will connect to NameNode at HTTP address: " + address);
-    return address;
+    final String scheme = DFSUtil.getHttpClientScheme(conf);
+    URI address = DFSUtil.getInfoServerWithDefaultHost(fsName.getHost(), conf,
+        scheme);
+    LOG.debug("Will connect to NameNode at " + address);
+    return address.toURL();
   }
   
   /**
    * Return the host:port of where this SecondaryNameNode is listening
    * for image transfers
    */
-  private InetSocketAddress getImageListenAddress() {
-    return new InetSocketAddress(infoBindAddress, infoPort);
+  private URL getImageListenAddress() {
+    return imageListenURL;
   }
 
   /**
@@ -817,7 +827,7 @@ public class SecondaryNameNode implements Runnable {
 
       @Override
       public void selectInputStreams(Collection<EditLogInputStream> streams,
-          long fromTxId, boolean inProgressOk, boolean forReading) {
+          long fromTxId, boolean inProgressOk) {
         Iterator<StorageDirectory> iter = storage.dirIterator();
         while (iter.hasNext()) {
           StorageDirectory dir = iter.next();
@@ -991,7 +1001,12 @@ public class SecondaryNameNode implements Runnable {
             sig.mostRecentCheckpointTxId + " even though it should have " +
             "just been downloaded");
       }
-      dstImage.reloadFromImageFile(file, dstNamesystem);
+      dstNamesystem.writeLock();
+      try {
+        dstImage.reloadFromImageFile(file, dstNamesystem);
+      } finally {
+        dstNamesystem.writeUnlock();
+      }
       dstNamesystem.dir.imageLoadComplete();
     }
     // error simulation code for junit test

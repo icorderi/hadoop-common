@@ -24,12 +24,10 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FsServerDefaults;
+import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
 import org.apache.hadoop.fs.Options.Rename;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.RemoteIterator;
-import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
-import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
@@ -103,11 +101,9 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSna
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.IsFileClosedRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.IsFileClosedResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCachePoolsRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCachePoolsResponseElementProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCachePoolsResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCorruptFileBlocksRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCorruptFileBlocksResponseProto;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CacheDirectiveEntryProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCacheDirectivesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCacheDirectivesResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.MetaSaveRequestProto;
@@ -174,9 +170,7 @@ import org.apache.hadoop.security.proto.SecurityProtos.GetDelegationTokenRespons
 import org.apache.hadoop.security.proto.SecurityProtos.RenewDelegationTokenRequestProto;
 import org.apache.hadoop.security.proto.SecurityProtos.RenewDelegationTokenResponseProto;
 import org.apache.hadoop.security.token.Token;
-import org.apache.commons.lang.StringUtils;
 
-import com.google.common.primitives.Shorts;
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
 
@@ -326,7 +320,7 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
     try {
       HdfsFileStatus result = server.create(req.getSrc(),
           PBHelper.convert(req.getMasked()), req.getClientName(),
-          PBHelper.convert(req.getCreateFlag()), req.getCreateParent(),
+          PBHelper.convertCreateFlag(req.getCreateFlag()), req.getCreateParent(),
           (short) req.getReplication(), req.getBlockSize());
 
       if (result != null) {
@@ -431,14 +425,17 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
       throws ServiceException {
     try {
       List<DatanodeInfoProto> existingList = req.getExistingsList();
+      List<String> existingStorageIDsList = req.getExistingStorageUuidsList();
       List<DatanodeInfoProto> excludesList = req.getExcludesList();
-      LocatedBlock result = server.getAdditionalDatanode(
-          req.getSrc(), PBHelper.convert(req.getBlk()),
+      LocatedBlock result = server.getAdditionalDatanode(req.getSrc(),
+          PBHelper.convert(req.getBlk()),
           PBHelper.convert(existingList.toArray(
               new DatanodeInfoProto[existingList.size()])),
+          existingStorageIDsList.toArray(
+              new String[existingStorageIDsList.size()]),
           PBHelper.convert(excludesList.toArray(
               new DatanodeInfoProto[excludesList.size()])), 
-              req.getNumAdditionalNodes(), req.getClientName());
+          req.getNumAdditionalNodes(), req.getClientName());
       return GetAdditionalDatanodeResponseProto.newBuilder().setBlock(
           PBHelper.convert(result))
           .build();
@@ -839,10 +836,12 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
       UpdatePipelineRequestProto req) throws ServiceException {
     try {
       List<DatanodeIDProto> newNodes = req.getNewNodesList();
-      server
-          .updatePipeline(req.getClientName(), PBHelper.convert(req
-              .getOldBlock()), PBHelper.convert(req.getNewBlock()), PBHelper
-              .convert(newNodes.toArray(new DatanodeIDProto[newNodes.size()])));
+      List<String> newStorageIDs = req.getStorageIDsList();
+      server.updatePipeline(req.getClientName(),
+          PBHelper.convert(req.getOldBlock()),
+          PBHelper.convert(req.getNewBlock()),
+          PBHelper.convert(newNodes.toArray(new DatanodeIDProto[newNodes.size()])),
+          newStorageIDs.toArray(new String[newStorageIDs.size()]));
       return VOID_UPDATEPIPELINE_RESPONSE;
     } catch (IOException e) {
       throw new ServiceException(e);
@@ -1035,9 +1034,11 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
       RpcController controller, AddCacheDirectiveRequestProto request)
       throws ServiceException {
     try {
+      long id = server.addCacheDirective(
+          PBHelper.convert(request.getInfo()),
+          PBHelper.convertCacheFlags(request.getCacheFlags()));
       return AddCacheDirectiveResponseProto.newBuilder().
-              setId(server.addCacheDirective(
-                  PBHelper.convert(request.getInfo()))).build();
+              setId(id).build();
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -1049,7 +1050,8 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
       throws ServiceException {
     try {
       server.modifyCacheDirective(
-          PBHelper.convert(request.getInfo()));
+          PBHelper.convert(request.getInfo()),
+          PBHelper.convertCacheFlags(request.getCacheFlags()));
       return ModifyCacheDirectiveResponseProto.newBuilder().build();
     } catch (IOException e) {
       throw new ServiceException(e);
@@ -1077,21 +1079,13 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
     try {
       CacheDirectiveInfo filter =
           PBHelper.convert(request.getFilter());
-      RemoteIterator<CacheDirectiveEntry> iter =
-         server.listCacheDirectives(request.getPrevId(), filter);
+      BatchedEntries<CacheDirectiveEntry> entries =
+        server.listCacheDirectives(request.getPrevId(), filter);
       ListCacheDirectivesResponseProto.Builder builder =
           ListCacheDirectivesResponseProto.newBuilder();
-      long prevId = 0;
-      while (iter.hasNext()) {
-        CacheDirectiveEntry entry = iter.next();
-        builder.addElements(PBHelper.convert(entry));
-        prevId = entry.getInfo().getId();
-      }
-      if (prevId == 0) {
-        builder.setHasMore(false);
-      } else {
-        iter = server.listCacheDirectives(prevId, filter);
-        builder.setHasMore(iter.hasNext());
+      builder.setHasMore(entries.hasMore());
+      for (int i=0, n=entries.size(); i<n; i++) {
+        builder.addElements(PBHelper.convert(entries.get(i)));
       }
       return builder.build();
     } catch (IOException e) {
@@ -1136,25 +1130,13 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
   public ListCachePoolsResponseProto listCachePools(RpcController controller,
       ListCachePoolsRequestProto request) throws ServiceException {
     try {
-      RemoteIterator<CachePoolInfo> iter =
+      BatchedEntries<CachePoolEntry> entries =
         server.listCachePools(request.getPrevPoolName());
       ListCachePoolsResponseProto.Builder responseBuilder =
         ListCachePoolsResponseProto.newBuilder();
-      String prevPoolName = null;
-      while (iter.hasNext()) {
-        CachePoolInfo pool = iter.next();
-        ListCachePoolsResponseElementProto.Builder elemBuilder = 
-            ListCachePoolsResponseElementProto.newBuilder();
-        elemBuilder.setInfo(PBHelper.convert(pool));
-        responseBuilder.addElements(elemBuilder.build());
-        prevPoolName = pool.getPoolName();
-      }
-      // fill in hasNext
-      if (prevPoolName == null) {
-        responseBuilder.setHasMore(false);
-      } else {
-        iter = server.listCachePools(prevPoolName);
-        responseBuilder.setHasMore(iter.hasNext());
+      responseBuilder.setHasMore(entries.hasMore());
+      for (int i=0, n=entries.size(); i<n; i++) {
+        responseBuilder.addEntries(PBHelper.convert(entries.get(i)));
       }
       return responseBuilder.build();
     } catch (IOException e) {

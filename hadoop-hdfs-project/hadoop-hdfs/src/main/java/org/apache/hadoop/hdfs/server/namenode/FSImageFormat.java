@@ -48,14 +48,14 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
+import org.apache.hadoop.hdfs.protocol.LayoutFlags;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot.FileDiffList;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.FileDiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectorySnapshottable;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeFileWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat.ReferenceMap;
@@ -262,6 +262,9 @@ public class FSImageFormat {
         }
         boolean supportSnapshot = LayoutVersion.supports(Feature.SNAPSHOT,
             imgVersion);
+        if (LayoutVersion.supports(Feature.ADD_LAYOUT_FLAGS, imgVersion)) {
+          LayoutFlags.read(in);
+        }
 
         // read namespaceID: first appeared in version -2
         in.readInt();
@@ -375,7 +378,7 @@ public class FSImageFormat {
     final long dsQuota = q.get(Quota.DISKSPACE);
     FSDirectory fsDir = namesystem.dir;
     if (nsQuota != -1 || dsQuota != -1) {
-      fsDir.rootDir.setQuota(nsQuota, dsQuota);
+      fsDir.rootDir.getDirectoryWithQuotaFeature().setQuota(nsQuota, dsQuota);
     }
     fsDir.rootDir.cloneModificationTime(root);
     fsDir.rootDir.clonePermissionStatus(root);    
@@ -697,11 +700,9 @@ public class FSImageFormat {
           modificationTime, atime, blocks, replication, blockSize);
       if (underConstruction) {
         file.toUnderConstruction(clientName, clientMachine, null);
-        return fileDiffs == null ? file : new INodeFileWithSnapshot(file,
-            fileDiffs);
+          return fileDiffs == null ? file : new INodeFile(file, fileDiffs);
       } else {
-        return fileDiffs == null ? file : 
-          new INodeFileWithSnapshot(file, fileDiffs);
+          return fileDiffs == null ? file : new INodeFile(file, fileDiffs);
       }
     } else if (numBlocks == -1) {
       //directory
@@ -729,13 +730,15 @@ public class FSImageFormat {
       if (counter != null) {
         counter.increment();
       }
-      final INodeDirectory dir = nsQuota >= 0 || dsQuota >= 0?
-          new INodeDirectoryWithQuota(inodeId, localName, permissions,
-              modificationTime, nsQuota, dsQuota)
-          : new INodeDirectory(inodeId, localName, permissions, modificationTime);
-      return snapshottable ? new INodeDirectorySnapshottable(dir)
-          : withSnapshot ? new INodeDirectoryWithSnapshot(dir)
-          : dir;
+      final INodeDirectory dir = new INodeDirectory(inodeId, localName,
+          permissions, modificationTime);
+      if (nsQuota >= 0 || dsQuota >= 0) {
+        dir.addDirectoryWithQuotaFeature(nsQuota, dsQuota);
+      }
+      if (withSnapshot) {
+        dir.addSnapshotFeature(null);
+      }
+      return snapshottable ? new INodeDirectorySnapshottable(dir) : dir;
     } else if (numBlocks == -2) {
       //symlink
 
@@ -871,7 +874,7 @@ public class FSImageFormat {
         //This must not happen if security is turned on.
         return; 
       }
-      namesystem.loadSecretManagerState(in);
+      namesystem.loadSecretManagerStateCompat(in);
     }
 
     private void loadCacheManagerState(DataInput in) throws IOException {
@@ -879,7 +882,7 @@ public class FSImageFormat {
       if (!LayoutVersion.supports(Feature.CACHING, imgVersion)) {
         return;
       }
-      namesystem.getCacheManager().loadState(in);
+      namesystem.getCacheManager().loadStateCompat(in);
     }
 
     private int getLayoutVersion() {
@@ -972,13 +975,14 @@ public class FSImageFormat {
       checkNotSaved();
 
       final FSNamesystem sourceNamesystem = context.getSourceNamesystem();
-      FSDirectory fsDir = sourceNamesystem.dir;
+      final INodeDirectory rootDir = sourceNamesystem.dir.rootDir;
+      final long numINodes = rootDir.getDirectoryWithQuotaFeature()
+          .getSpaceConsumed().get(Quota.NAMESPACE);
       String sdPath = newFile.getParentFile().getParentFile().getAbsolutePath();
       Step step = new Step(StepType.INODES, sdPath);
       StartupProgress prog = NameNode.getStartupProgress();
       prog.beginStep(Phase.SAVING_CHECKPOINT, step);
-      prog.setTotal(Phase.SAVING_CHECKPOINT, step,
-        fsDir.rootDir.numItemsInTree());
+      prog.setTotal(Phase.SAVING_CHECKPOINT, step, numINodes);
       Counter counter = prog.getCounter(Phase.SAVING_CHECKPOINT, step);
       long startTime = now();
       //
@@ -990,6 +994,7 @@ public class FSImageFormat {
       DataOutputStream out = new DataOutputStream(fos);
       try {
         out.writeInt(HdfsConstants.LAYOUT_VERSION);
+        LayoutFlags.write(out);
         // We use the non-locked version of getNamespaceInfo here since
         // the coordinating thread of saveNamespace already has read-locked
         // the namespace for us. If we attempt to take another readlock
@@ -997,7 +1002,7 @@ public class FSImageFormat {
         // fairness-related deadlock. See the comments on HDFS-2223.
         out.writeInt(sourceNamesystem.unprotectedGetNamespaceInfo()
             .getNamespaceID());
-        out.writeLong(fsDir.rootDir.numItemsInTree());
+        out.writeLong(numINodes);
         out.writeLong(sourceNamesystem.getGenerationStampV1());
         out.writeLong(sourceNamesystem.getGenerationStampV2());
         out.writeLong(sourceNamesystem.getGenerationStampAtblockIdSwitch());
@@ -1014,14 +1019,13 @@ public class FSImageFormat {
                  " using " + compression);
 
         // save the root
-        saveINode2Image(fsDir.rootDir, out, false, referenceMap, counter);
+        saveINode2Image(rootDir, out, false, referenceMap, counter);
         // save the rest of the nodes
-        saveImage(fsDir.rootDir, out, true, false, counter);
+        saveImage(rootDir, out, true, false, counter);
         prog.endStep(Phase.SAVING_CHECKPOINT, step);
         // Now that the step is finished, set counter equal to total to adjust
         // for possible under-counting due to reference inodes.
-        prog.setCount(Phase.SAVING_CHECKPOINT, step,
-          fsDir.rootDir.numItemsInTree());
+        prog.setCount(Phase.SAVING_CHECKPOINT, step, numINodes);
         // save files under construction
         // TODO: for HDFS-5428, since we cannot break the compatibility of 
         // fsimage, we store part of the under-construction files that are only
@@ -1033,9 +1037,9 @@ public class FSImageFormat {
         sourceNamesystem.saveFilesUnderConstruction(out, snapshotUCMap);
         
         context.checkCancelled();
-        sourceNamesystem.saveSecretManagerState(out, sdPath);
+        sourceNamesystem.saveSecretManagerStateCompat(out, sdPath);
         context.checkCancelled();
-        sourceNamesystem.getCacheManager().saveState(out, sdPath);
+        sourceNamesystem.getCacheManager().saveStateCompat(out, sdPath);
         context.checkCancelled();
         out.flush();
         context.checkCancelled();
@@ -1112,13 +1116,14 @@ public class FSImageFormat {
         return;
       }
       
-      final ReadOnlyList<INode> children = current.getChildrenList(null);
+      final ReadOnlyList<INode> children = current
+          .getChildrenList(Snapshot.CURRENT_STATE_ID);
       int dirNum = 0;
       List<INodeDirectory> snapshotDirs = null;
-      if (current instanceof INodeDirectoryWithSnapshot) {
+      DirectoryWithSnapshotFeature sf = current.getDirectoryWithSnapshotFeature();
+      if (sf != null) {
         snapshotDirs = new ArrayList<INodeDirectory>();
-        ((INodeDirectoryWithSnapshot) current).getSnapshotDirectory(
-            snapshotDirs);
+        sf.getSnapshotDirectory(snapshotDirs);
         dirNum += snapshotDirs.size();
       }
       
