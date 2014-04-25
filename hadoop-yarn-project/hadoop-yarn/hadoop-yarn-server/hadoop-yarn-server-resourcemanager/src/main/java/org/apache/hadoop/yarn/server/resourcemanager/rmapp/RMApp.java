@@ -21,6 +21,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.rmapp;
 import java.util.Collection;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -194,16 +195,19 @@ public interface RMApp extends EventHandler<RMAppEvent> {
    * Returns the application type
    * @return the application type.
    */
-  String getApplicationType(); 
+  String getApplicationType();
 
   /**
-   * Check whether this application is safe to terminate.
-   * An application is deemed to be safe to terminate if it is an unmanaged
-   * AM or its state has been saved in state store.
-   * @return the flag which indicates whether this application is safe to
-   *         terminate.
+   * Get tags for the application
+   * @return tags corresponding to the application
    */
-  boolean isAppSafeToTerminate();
+  Set<String> getApplicationTags();
+
+  /**
+   * Check whether this application's state has been saved to the state store.
+   * @return the flag indicating whether the applications's state is stored.
+   */
+  boolean isAppFinalStateStored();
 
   /**
    * Create the external user-facing state of ApplicationMaster from the

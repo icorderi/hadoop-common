@@ -18,13 +18,17 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
+import static org.mockito.Matchers.argThat;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.spy;
+
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -33,6 +37,7 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.Container;
@@ -44,17 +49,29 @@ import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.event.AbstractEvent;
+import org.apache.hadoop.yarn.event.AsyncDispatcher;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.junit.Test;
+import org.mockito.ArgumentMatcher;
 
+@SuppressWarnings({"unchecked", "rawtypes"})
 public class TestRM {
 
   private static final Log LOG = LogFactory.getLog(TestRM.class);
@@ -155,7 +172,62 @@ public class TestRM {
 
     rm.stop();
   }
-  
+
+  // Test even if AM container is allocated with containerId not equal to 1, the
+  // following allocate requests from AM should be able to retrieve the
+  // corresponding NM Token.
+  @Test (timeout = 20000)
+  public void testNMTokenSentForNormalContainer() throws Exception {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.set(YarnConfiguration.RM_SCHEDULER,
+        CapacityScheduler.class.getCanonicalName());
+    MockRM rm = new MockRM(conf);
+    rm.start();
+    MockNM nm1 = rm.registerNode("h1:1234", 5120);
+    RMApp app = rm.submitApp(2000);
+    RMAppAttempt attempt = app.getCurrentAppAttempt();
+
+    // Call getNewContainerId to increase container Id so that the AM container
+    // Id doesn't equal to one.
+    CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
+    cs.getApplicationAttempt(attempt.getAppAttemptId()).getNewContainerId();
+
+    // kick the scheduling
+    nm1.nodeHeartbeat(true);
+    MockAM am = MockRM.launchAM(app, rm, nm1);
+    // am container Id not equal to 1.
+    Assert.assertTrue(attempt.getMasterContainer().getId().getId() != 1);
+    // NMSecretManager doesn't record the node on which the am is allocated.
+    Assert.assertFalse(rm.getRMContext().getNMTokenSecretManager()
+      .isApplicationAttemptNMTokenPresent(attempt.getAppAttemptId(),
+        nm1.getNodeId()));
+    am.registerAppAttempt();
+    rm.waitForState(app.getApplicationId(), RMAppState.RUNNING);
+
+    int NUM_CONTAINERS = 1;
+    List<Container> containers = new ArrayList<Container>();
+    // nmTokens keeps track of all the nmTokens issued in the allocate call.
+    List<NMToken> expectedNMTokens = new ArrayList<NMToken>();
+
+    // am1 allocate 1 container on nm1.
+    while (true) {
+      AllocateResponse response =
+          am.allocate("127.0.0.1", 2000, NUM_CONTAINERS,
+            new ArrayList<ContainerId>());
+      nm1.nodeHeartbeat(true);
+      containers.addAll(response.getAllocatedContainers());
+      expectedNMTokens.addAll(response.getNMTokens());
+      if (containers.size() == NUM_CONTAINERS) {
+        break;
+      }
+      Thread.sleep(200);
+      System.out.println("Waiting for container to be allocated.");
+    }
+    NodeId nodeId = expectedNMTokens.get(0).getNodeId();
+    // NMToken is sent for the allocated container.
+    Assert.assertEquals(nm1.getNodeId(), nodeId);
+  }
+
   @Test (timeout = 40000)
   public void testNMToken() throws Exception {
     MockRM rm = new MockRM();
@@ -397,19 +469,19 @@ public class TestRM {
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
     nm1.registerNode();
-    MockAM am1 = MockRM.launchAM(app1, rm1, nm1);
-    MockRM.finishApplicationMaster(app1, rm1, nm1, am1);
+    MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
+    MockRM.finishAMAndVerifyAppState(app1, rm1, nm1, am1);
 
     // a failed app
     RMApp app2 = rm1.submitApp(200);
-    MockAM am2 = MockRM.launchAM(app2, rm1, nm1);
+    MockAM am2 = MockRM.launchAndRegisterAM(app2, rm1, nm1);
     nm1.nodeHeartbeat(am2.getApplicationAttemptId(), 1, ContainerState.COMPLETE);
     am2.waitForState(RMAppAttemptState.FAILED);
     rm1.waitForState(app2.getApplicationId(), RMAppState.FAILED);
 
     // a killed app
     RMApp app3 = rm1.submitApp(200);
-    MockAM am3 = MockRM.launchAM(app3, rm1, nm1);
+    MockAM am3 = MockRM.launchAndRegisterAM(app3, rm1, nm1);
     rm1.killApp(app3.getApplicationId());
     rm1.waitForState(app3.getApplicationId(), RMAppState.KILLED);
     rm1.waitForState(am3.getApplicationAttemptId(), RMAppAttemptState.KILLED);
@@ -449,7 +521,7 @@ public class TestRM {
 
     // a failed app
     RMApp app2 = rm1.submitApp(200);
-    MockAM am2 = MockRM.launchAM(app2, rm1, nm1);
+    MockAM am2 = MockRM.launchAndRegisterAM(app2, rm1, nm1);
     nm1
       .nodeHeartbeat(am2.getApplicationAttemptId(), 1, ContainerState.COMPLETE);
     am2.waitForState(RMAppAttemptState.FAILED);
@@ -466,10 +538,99 @@ public class TestRM {
     Assert.assertEquals(-1, report1.getRpcPort());
   }
 
+  /**
+   * Validate killing an application when it is at accepted state.
+   * @throws Exception exception
+   */
+  @Test (timeout = 60000)
+  public void testApplicationKillAtAcceptedState() throws Exception {
+
+    YarnConfiguration conf = new YarnConfiguration();
+    final Dispatcher dispatcher = new AsyncDispatcher() {
+      @Override
+      public EventHandler getEventHandler() {
+
+        class EventArgMatcher extends ArgumentMatcher<AbstractEvent> {
+          @Override
+          public boolean matches(Object argument) {
+            if (argument instanceof RMAppAttemptEvent) {
+              if (((RMAppAttemptEvent) argument).getType().equals(
+                RMAppAttemptEventType.KILL)) {
+                return true;
+              }
+            }
+            return false;
+          }
+        }
+
+        EventHandler handler = spy(super.getEventHandler());
+        doNothing().when(handler).handle(argThat(new EventArgMatcher()));
+        return handler;
+      }
+    };
+
+    MockRM rm = new MockRM(conf) {
+      @Override
+      protected Dispatcher createDispatcher() {
+        return dispatcher;
+      }
+    };
+
+    // test metrics
+    QueueMetrics metrics = rm.getResourceScheduler().getRootQueueMetrics();
+    int appsKilled = metrics.getAppsKilled();
+    int appsSubmitted = metrics.getAppsSubmitted();
+
+    rm.start();
+    
+    MockNM nm1 =
+        new MockNM("127.0.0.1:1234", 15120, rm.getResourceTrackerService());
+    nm1.registerNode();
+
+    // a failed app
+    RMApp application = rm.submitApp(200);
+    MockAM am = MockRM.launchAM(application, rm, nm1);
+    am.waitForState(RMAppAttemptState.LAUNCHED);
+    nm1.nodeHeartbeat(am.getApplicationAttemptId(), 1, ContainerState.RUNNING);
+    rm.waitForState(application.getApplicationId(), RMAppState.ACCEPTED);
+
+    // Now kill the application before new attempt is launched, the app report
+    // returns the invalid AM host and port.
+    KillApplicationRequest request =
+        KillApplicationRequest.newInstance(application.getApplicationId());
+    rm.getClientRMService().forceKillApplication(request);
+
+    // Specific test for YARN-1689 follows
+    // Now let's say a race causes AM to register now. This should not crash RM.
+    am.registerAppAttempt(false);
+
+    // We explicitly intercepted the kill-event to RMAppAttempt, so app should
+    // still be in KILLING state.
+    rm.waitForState(application.getApplicationId(), RMAppState.KILLING);
+    // AM should now be in running
+    rm.waitForState(am.getApplicationAttemptId(), RMAppAttemptState.RUNNING);
+
+    // Simulate that appAttempt is killed.
+    rm.getRMContext().getDispatcher().getEventHandler().handle(
+        new RMAppEvent(application.getApplicationId(),
+          RMAppEventType.ATTEMPT_KILLED));
+    rm.waitForState(application.getApplicationId(), RMAppState.KILLED);
+
+    // test metrics
+    metrics = rm.getResourceScheduler().getRootQueueMetrics();
+    Assert.assertEquals(appsKilled + 1, metrics.getAppsKilled());
+    Assert.assertEquals(appsSubmitted + 1, metrics.getAppsSubmitted());
+  }
+
   public static void main(String[] args) throws Exception {
     TestRM t = new TestRM();
     t.testGetNewAppId();
     t.testAppWithNoContainers();
     t.testAppOnMultiNode();
+    t.testNMToken();
+    t.testActivatingApplicationAfterAddingNM();
+    t.testInvalidateAMHostPortWhenAMFailedOrKilled();
+    t.testInvalidatedAMHostPortOnAMRestart();
+    t.testApplicationKillAtAcceptedState();
   }
 }

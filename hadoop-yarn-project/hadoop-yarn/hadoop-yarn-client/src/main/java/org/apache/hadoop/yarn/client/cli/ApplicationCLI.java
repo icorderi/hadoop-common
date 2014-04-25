@@ -40,6 +40,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
@@ -61,6 +62,7 @@ public class ApplicationCLI extends YarnCLI {
   private static final String APP_TYPE_CMD = "appTypes";
   private static final String APP_STATE_CMD = "appStates";
   private static final String ALLSTATES_OPTION = "ALL";
+  private static final String QUEUE_CMD = "queue";
   public static final String APPLICATION = "application";
   public static final String APPLICATION_ATTEMPT = "applicationattempt";
   public static final String CONTAINER = "container";
@@ -78,41 +80,59 @@ public class ApplicationCLI extends YarnCLI {
 
   @Override
   public int run(String[] args) throws Exception {
-
     Options opts = new Options();
-    opts.addOption(STATUS_CMD, true,
-        "Prints the status of the application.");
-    if (args.length > 0
-        && args[0].compareToIgnoreCase(APPLICATION_ATTEMPT) == 0) {
-      opts.addOption(LIST_CMD, true,
-          "List application attempts for aplication from AHS. ");
-    } else if (args.length > 0 && args[0].compareToIgnoreCase("container") == 0) {
-      opts.addOption(LIST_CMD, true,
-          "List containers for application attempts from AHS. ");
-    } else {
-      opts.addOption(LIST_CMD, false, "List applications from the RM. "
+    String title = null;
+    if (args.length > 0 && args[0].equalsIgnoreCase(APPLICATION)) {
+      title = APPLICATION;
+      opts.addOption(STATUS_CMD, true,
+          "Prints the status of the application.");
+      opts.addOption(LIST_CMD, false, "List applications. "
           + "Supports optional use of -appTypes to filter applications "
           + "based on application type, "
-          + "and -appStates to filter applications based on application state");
+          + "and -appStates to filter applications based on application state.");
+      opts.addOption(KILL_CMD, true, "Kills the application.");
+      opts.addOption(MOVE_TO_QUEUE_CMD, true, "Moves the application to a "
+          + "different queue.");
+      opts.addOption(QUEUE_CMD, true, "Works with the movetoqueue command to"
+          + " specify which queue to move an application to.");
+      opts.addOption(HELP_CMD, false, "Displays help for all commands.");
+      Option appTypeOpt = new Option(APP_TYPE_CMD, true, "Works with -list to "
+          + "filter applications based on "
+          + "input comma-separated list of application types.");
+      appTypeOpt.setValueSeparator(',');
+      appTypeOpt.setArgs(Option.UNLIMITED_VALUES);
+      appTypeOpt.setArgName("Types");
+      opts.addOption(appTypeOpt);
+      Option appStateOpt = new Option(APP_STATE_CMD, true, "Works with -list "
+          + "to filter applications based on input comma-separated list of "
+          + "application states. " + getAllValidApplicationStates());
+      appStateOpt.setValueSeparator(',');
+      appStateOpt.setArgs(Option.UNLIMITED_VALUES);
+      appStateOpt.setArgName("States");
+      opts.addOption(appStateOpt);
+      opts.getOption(KILL_CMD).setArgName("Application ID");
+      opts.getOption(MOVE_TO_QUEUE_CMD).setArgName("Application ID");
+      opts.getOption(QUEUE_CMD).setArgName("Queue Name");
+      opts.getOption(STATUS_CMD).setArgName("Application ID");
+    } else if (args.length > 0 && args[0].equalsIgnoreCase(APPLICATION_ATTEMPT)) {
+      title = APPLICATION_ATTEMPT;
+      opts.addOption(STATUS_CMD, true,
+          "Prints the status of the application attempt.");
+      opts.addOption(LIST_CMD, true,
+          "List application attempts for aplication.");
+      opts.addOption(HELP_CMD, false, "Displays help for all commands.");
+      opts.getOption(STATUS_CMD).setArgName("Application Attempt ID");
+      opts.getOption(LIST_CMD).setArgName("Application ID");
+    } else if (args.length > 0 && args[0].equalsIgnoreCase(CONTAINER)) {
+      title = CONTAINER;
+      opts.addOption(STATUS_CMD, true,
+          "Prints the status of the container.");
+      opts.addOption(LIST_CMD, true,
+          "List containers for application attempt.");
+      opts.addOption(HELP_CMD, false, "Displays help for all commands.");
+      opts.getOption(STATUS_CMD).setArgName("Container ID");
+      opts.getOption(LIST_CMD).setArgName("Application Attempt ID");
     }
-    opts.addOption(KILL_CMD, true, "Kills the application.");
-    opts.addOption(HELP_CMD, false, "Displays help for all commands.");
-    Option appTypeOpt = new Option(APP_TYPE_CMD, true, "Works with -list to "
-        + "filter applications based on "
-        + "input comma-separated list of application types.");
-    appTypeOpt.setValueSeparator(',');
-    appTypeOpt.setArgs(Option.UNLIMITED_VALUES);
-    appTypeOpt.setArgName("Types");
-    opts.addOption(appTypeOpt);
-    Option appStateOpt = new Option(APP_STATE_CMD, true, "Works with -list "
-        + "to filter applications based on input comma-separated list of "
-        + "application states. " + getAllValidApplicationStates());
-    appStateOpt.setValueSeparator(',');
-    appStateOpt.setArgs(Option.UNLIMITED_VALUES);
-    appStateOpt.setArgName("States");
-    opts.addOption(appStateOpt);
-    opts.getOption(KILL_CMD).setArgName("Application ID");
-    opts.getOption(STATUS_CMD).setArgName("Application ID");
 
     int exitCode = -1;
     CommandLine cliParser = null;
@@ -120,43 +140,24 @@ public class ApplicationCLI extends YarnCLI {
       cliParser = new GnuParser().parse(opts, args);
     } catch (MissingArgumentException ex) {
       sysout.println("Missing argument for options");
-      printUsage(opts);
+      printUsage(title, opts);
       return exitCode;
     }
 
     if (cliParser.hasOption(STATUS_CMD)) {
-      if ((args[0].compareToIgnoreCase(APPLICATION) == 0)
-          || (args[0].compareToIgnoreCase(APPLICATION_ATTEMPT) == 0)
-          || (args[0].compareToIgnoreCase(CONTAINER) == 0)) {
-        if (args.length != 3) {
-          printUsage(opts);
-          return exitCode;
-        }
-      } else if (args.length != 2) {
-        printUsage(opts);
+      if (args.length != 3) {
+        printUsage(title, opts);
         return exitCode;
       }
-      if (args[0].compareToIgnoreCase(APPLICATION_ATTEMPT) == 0) {
-        printApplicationAttemptReport(cliParser.getOptionValue(STATUS_CMD));
-      } else if (args[0].compareToIgnoreCase(CONTAINER) == 0) {
-        printContainerReport(cliParser.getOptionValue(STATUS_CMD));
-      } else {
+      if (args[0].equalsIgnoreCase(APPLICATION)) {
         printApplicationReport(cliParser.getOptionValue(STATUS_CMD));
+      } else if (args[0].equalsIgnoreCase(APPLICATION_ATTEMPT)) {
+        printApplicationAttemptReport(cliParser.getOptionValue(STATUS_CMD));
+      } else if (args[0].equalsIgnoreCase(CONTAINER)) {
+        printContainerReport(cliParser.getOptionValue(STATUS_CMD));
       }
     } else if (cliParser.hasOption(LIST_CMD)) {
-      if (args[0].compareToIgnoreCase(APPLICATION_ATTEMPT) == 0) {
-        if (args.length != 3) {
-          printUsage(opts);
-          return exitCode;
-        }
-        listApplicationAttempts(cliParser.getOptionValue(LIST_CMD));
-      } else if (args[0].compareToIgnoreCase(CONTAINER) == 0) {
-        if (args.length != 3) {
-          printUsage(opts);
-          return exitCode;
-        }
-        listContainers(cliParser.getOptionValue(LIST_CMD));
-      } else {
+      if (args[0].equalsIgnoreCase(APPLICATION)) {
         allAppStates = false;
         Set<String> appTypes = new HashSet<String>();
         if (cliParser.hasOption(APP_TYPE_CMD)) {
@@ -195,19 +196,42 @@ public class ApplicationCLI extends YarnCLI {
           }
         }
         listApplications(appTypes, appStates);
+      } else if (args[0].equalsIgnoreCase(APPLICATION_ATTEMPT)) {
+        if (args.length != 3) {
+          printUsage(title, opts);
+          return exitCode;
+        }
+        listApplicationAttempts(cliParser.getOptionValue(LIST_CMD));
+      } else if (args[0].equalsIgnoreCase(CONTAINER)) {
+        if (args.length != 3) {
+          printUsage(title, opts);
+          return exitCode;
+        }
+        listContainers(cliParser.getOptionValue(LIST_CMD));
       }
     } else if (cliParser.hasOption(KILL_CMD)) {
-      if (args.length != 2) {
-        printUsage(opts);
+      if (args.length != 3) {
+        printUsage(title, opts);
         return exitCode;
       }
-      killApplication(cliParser.getOptionValue(KILL_CMD));
+      try{
+        killApplication(cliParser.getOptionValue(KILL_CMD));
+      } catch (ApplicationNotFoundException e) {
+        return exitCode;
+      }
+    } else if (cliParser.hasOption(MOVE_TO_QUEUE_CMD)) {
+      if (!cliParser.hasOption(QUEUE_CMD)) {
+        printUsage(title, opts);
+        return exitCode;
+      }
+      moveApplicationAcrossQueues(cliParser.getOptionValue(MOVE_TO_QUEUE_CMD),
+          cliParser.getOptionValue(QUEUE_CMD));
     } else if (cliParser.hasOption(HELP_CMD)) {
-      printUsage(opts);
+      printUsage(title, opts);
       return 0;
     } else {
       syserr.println("Invalid Command Usage : ");
-      printUsage(opts);
+      printUsage(title, opts);
     }
     return 0;
   }
@@ -218,8 +242,8 @@ public class ApplicationCLI extends YarnCLI {
    * @param opts
    */
   @VisibleForTesting
-  void printUsage(Options opts) {
-    new HelpFormatter().printHelp("application", opts);
+  void printUsage(String title, Options opts) {
+    new HelpFormatter().printHelp(title, opts);
   }
 
   /**
@@ -356,7 +380,15 @@ public class ApplicationCLI extends YarnCLI {
   private void killApplication(String applicationId) throws YarnException,
       IOException {
     ApplicationId appId = ConverterUtils.toApplicationId(applicationId);
-    ApplicationReport appReport = client.getApplicationReport(appId);
+    ApplicationReport  appReport = null;
+    try {
+      appReport = client.getApplicationReport(appId);
+    } catch (ApplicationNotFoundException e) {
+      sysout.println("Application with id '" + applicationId +
+          "' doesn't exist in RM.");
+      throw e;
+    }
+
     if (appReport.getYarnApplicationState() == YarnApplicationState.FINISHED
         || appReport.getYarnApplicationState() == YarnApplicationState.KILLED
         || appReport.getYarnApplicationState() == YarnApplicationState.FAILED) {
@@ -364,6 +396,24 @@ public class ApplicationCLI extends YarnCLI {
     } else {
       sysout.println("Killing application " + applicationId);
       client.killApplication(appId);
+    }
+  }
+
+  /**
+   * Moves the application with the given ID to the given queue.
+   */
+  private void moveApplicationAcrossQueues(String applicationId, String queue)
+      throws YarnException, IOException {
+    ApplicationId appId = ConverterUtils.toApplicationId(applicationId);
+    ApplicationReport appReport = client.getApplicationReport(appId);
+    if (appReport.getYarnApplicationState() == YarnApplicationState.FINISHED
+        || appReport.getYarnApplicationState() == YarnApplicationState.KILLED
+        || appReport.getYarnApplicationState() == YarnApplicationState.FAILED) {
+      sysout.println("Application " + applicationId + " has already finished ");
+    } else {
+      sysout.println("Moving application " + applicationId + " to queue " + queue);
+      client.moveApplicationAcrossQueues(appId, queue);
+      sysout.println("Successfully completed move.");
     }
   }
 
@@ -438,12 +488,12 @@ public class ApplicationCLI extends YarnCLI {
    * @throws YarnException
    * @throws IOException
    */
-  private void listApplicationAttempts(String appId) throws YarnException,
+  private void listApplicationAttempts(String applicationId) throws YarnException,
       IOException {
     PrintWriter writer = new PrintWriter(sysout);
 
     List<ApplicationAttemptReport> appAttemptsReport = client
-        .getApplicationAttempts(ConverterUtils.toApplicationId(appId));
+        .getApplicationAttempts(ConverterUtils.toApplicationId(applicationId));
     writer.println("Total number of application attempts " + ":"
         + appAttemptsReport.size());
     writer.printf(APPLICATION_ATTEMPTS_PATTERN, "ApplicationAttempt-Id",

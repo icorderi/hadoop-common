@@ -20,7 +20,6 @@ package org.apache.hadoop.hdfs.server.namenode;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -154,6 +153,31 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
     return nodeToUpdate;
   }
 
+  abstract AclFeature getAclFeature(int snapshotId);
+
+  @Override
+  public final AclFeature getAclFeature() {
+    return getAclFeature(Snapshot.CURRENT_STATE_ID);
+  }
+
+  abstract void addAclFeature(AclFeature aclFeature);
+
+  final INode addAclFeature(AclFeature aclFeature, int latestSnapshotId)
+      throws QuotaExceededException {
+    final INode nodeToUpdate = recordModification(latestSnapshotId);
+    nodeToUpdate.addAclFeature(aclFeature);
+    return nodeToUpdate;
+  }
+
+  abstract void removeAclFeature();
+
+  final INode removeAclFeature(int latestSnapshotId)
+      throws QuotaExceededException {
+    final INode nodeToUpdate = recordModification(latestSnapshotId);
+    nodeToUpdate.removeAclFeature();
+    return nodeToUpdate;
+  }
+  
   /**
    * @return if the given snapshot id is {@link Snapshot#CURRENT_STATE_ID},
    *         return this; otherwise return the corresponding snapshot inode.
@@ -627,12 +651,12 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
 
 
   /**
-   * Breaks file path into components.
-   * @param path
-   * @return array of byte arrays each of which represents 
+   * Breaks {@code path} into components.
+   * @return array of byte arrays each of which represents
    * a single path component.
    */
-  static byte[][] getPathComponents(String path) {
+  @VisibleForTesting
+  public static byte[][] getPathComponents(String path) {
     return getPathComponents(getPathNames(path));
   }
 
@@ -648,8 +672,7 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
   }
 
   /**
-   * Splits an absolute path into an array of path components.
-   * @param path
+   * Splits an absolute {@code path} into an array of path components.
    * @throws AssertionError if the given path is invalid.
    * @return array of path components.
    */
@@ -725,12 +748,7 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
     /**
      * The list of blocks that need to be removed from blocksMap
      */
-    private List<Block> toDeleteList;
-    
-    public BlocksMapUpdateInfo(List<Block> toDeleteList) {
-      this.toDeleteList = toDeleteList == null ? new ArrayList<Block>()
-          : toDeleteList;
-    }
+    private final List<Block> toDeleteList;
     
     public BlocksMapUpdateInfo() {
       toDeleteList = new ChunkedArrayList<Block>();

@@ -26,7 +26,7 @@ option java_package = "org.apache.hadoop.hdfs.qjournal.protocol";
 option java_outer_classname = "QJournalProtocolProtos";
 option java_generic_services = true;
 option java_generate_equals_and_hash = true;
-package hadoop.hdfs;
+package hadoop.hdfs.qjournal;
 
 import "hdfs.proto";
 
@@ -94,6 +94,7 @@ message HeartbeatResponseProto { // void response
 message StartLogSegmentRequestProto {
   required RequestInfoProto reqInfo = 1;
   required uint64 txid = 2; // Transaction ID
+  optional sint32 layoutVersion = 3; // the LayoutVersion in the client
 }
 
 message StartLogSegmentResponseProto { 
@@ -197,6 +198,17 @@ message DoRollbackRequestProto {
 }
 
 message DoRollbackResponseProto {
+}
+
+/**
+ * discardSegments()
+ */
+message DiscardSegmentsRequestProto {
+  required JournalIdProto jid = 1;
+  required uint64 startTxId = 2;
+}
+
+message DiscardSegmentsResponseProto {
 }
 
 /**
@@ -313,6 +325,8 @@ service QJournalProtocolService {
   rpc canRollBack(CanRollBackRequestProto) returns (CanRollBackResponseProto);
 
   rpc doRollback(DoRollbackRequestProto) returns (DoRollbackResponseProto);
+
+  rpc discardSegments(DiscardSegmentsRequestProto) returns (DiscardSegmentsResponseProto);
 
   rpc getJournalState(GetJournalStateRequestProto) returns (GetJournalStateResponseProto);
 

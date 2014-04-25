@@ -21,6 +21,7 @@ import static org.junit.Assert.*;
 
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang.StringUtils;
@@ -59,7 +60,7 @@ public class TestGlobPaths {
   static private FileContext unprivilegedFc;
   static final private int NUM_OF_PATHS = 4;
   static private String USER_DIR;
-  private Path[] path = new Path[NUM_OF_PATHS];
+  private final Path[] path = new Path[NUM_OF_PATHS];
 
   @BeforeClass
   public static void setUp() throws Exception {
@@ -1174,5 +1175,33 @@ public class TestGlobPaths {
   @Test
   public void testReservedHdfsPathsOnFC() throws Exception {
     testOnFileContext(new TestReservedHdfsPaths());
+  }
+  
+  /**
+   * Test trying to glob the root.  Regression test for HDFS-5888.
+   **/
+  private static class TestGlobRoot implements FSTestWrapperGlobTest {
+    public void run(FSTestWrapper wrap, FSTestWrapper unprivilegedWrap,
+        FileSystem fs, FileContext fc) throws Exception {
+      final Path rootPath = new Path("/");
+      FileStatus oldRootStatus = wrap.getFileStatus(rootPath);
+      String newOwner = UUID.randomUUID().toString();
+      wrap.setOwner(new Path("/"), newOwner, null);
+      FileStatus[] status = 
+          wrap.globStatus(rootPath, new AcceptAllPathFilter());
+      Assert.assertEquals(1, status.length);
+      Assert.assertEquals(newOwner, status[0].getOwner());
+      wrap.setOwner(new Path("/"), oldRootStatus.getOwner(), null);
+    }
+  }
+
+  @Test
+  public void testGlobRootOnFS() throws Exception {
+    testOnFileSystem(new TestGlobRoot());
+  }
+
+  @Test
+  public void testGlobRootOnFC() throws Exception {
+    testOnFileContext(new TestGlobRoot());
   }
 }

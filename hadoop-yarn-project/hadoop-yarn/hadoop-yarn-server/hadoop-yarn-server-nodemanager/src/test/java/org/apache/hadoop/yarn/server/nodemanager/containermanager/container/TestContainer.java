@@ -48,7 +48,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -310,6 +310,45 @@ public class TestContainer {
       }
     }
   }
+
+  @Test
+  public void testKillOnNew() throws Exception {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(13, 314159265358979L, 4344, "yak");
+      assertEquals(ContainerState.NEW, wc.c.getContainerState());
+      wc.killContainer();
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(ExitCode.TERMINATED.getExitCode(),
+          wc.c.cloneAndGetContainerStatus().getExitStatus());
+      assertTrue(wc.c.cloneAndGetContainerStatus().getDiagnostics()
+          .contains("KillRequest"));
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
+  @Test
+  public void testKillOnLocalizing() throws Exception {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(14, 314159265358979L, 4344, "yak");
+      wc.initContainer();
+      assertEquals(ContainerState.LOCALIZING, wc.c.getContainerState());
+      wc.killContainer();
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
+      assertEquals(ExitCode.TERMINATED.getExitCode(),
+          wc.c.cloneAndGetContainerStatus().getExitStatus());
+      assertTrue(wc.c.cloneAndGetContainerStatus().getDiagnostics()
+          .contains("KillRequest"));
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
   
   @Test
   public void testKillOnLocalizationFailed() throws Exception {
@@ -348,6 +387,9 @@ public class TestContainer {
           wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
+      wc.c.handle(new ContainerEvent(wc.c.getContainerId(),
+          ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP));
+      assertEquals(0, metrics.getRunningContainers());
     } finally {
       if (wc != null) {
         wc.finished();

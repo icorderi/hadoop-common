@@ -82,11 +82,11 @@ public class AvailableSpaceVolumeChoosingPolicy<V extends FsVolumeSpi>
     return null;
   }
   
-  private VolumeChoosingPolicy<V> roundRobinPolicyBalanced =
+  private final VolumeChoosingPolicy<V> roundRobinPolicyBalanced =
       new RoundRobinVolumeChoosingPolicy<V>();
-  private VolumeChoosingPolicy<V> roundRobinPolicyHighAvailable =
+  private final VolumeChoosingPolicy<V> roundRobinPolicyHighAvailable =
       new RoundRobinVolumeChoosingPolicy<V>();
-  private VolumeChoosingPolicy<V> roundRobinPolicyLowAvailable =
+  private final VolumeChoosingPolicy<V> roundRobinPolicyLowAvailable =
       new RoundRobinVolumeChoosingPolicy<V>();
 
   @Override
@@ -165,13 +165,8 @@ public class AvailableSpaceVolumeChoosingPolicy<V extends FsVolumeSpi>
     }
     
     /**
-     * Check if the available space on all the volumes is roughly equal.
-     * 
-     * @param volumes the volumes to check
-     * @return true if all volumes' free space is within the configured threshold,
-     *         false otherwise.
-     * @throws IOException
-     *           in the event of error checking amount of available space
+     * @return true if all volumes' free space is within the
+     *         configured threshold, false otherwise.
      */
     public boolean areAllVolumesWithinFreeSpaceThreshold() {
       long leastAvailable = Long.MAX_VALUE;

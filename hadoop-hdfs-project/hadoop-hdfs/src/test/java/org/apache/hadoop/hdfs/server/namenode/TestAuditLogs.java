@@ -28,6 +28,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -41,7 +42,6 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.web.HftpFileSystem;
 import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.security.AccessControlException;
@@ -67,7 +67,7 @@ import org.junit.runners.Parameterized.Parameters;
 @RunWith(Parameterized.class)
 public class TestAuditLogs {
   static final String auditLogFile = PathUtils.getTestDirName(TestAuditLogs.class) + "/TestAuditLogs-audit.log";
-  boolean useAsyncLog;
+  final boolean useAsyncLog;
   
   @Parameters
   public static Collection<Object[]> data() {
@@ -220,30 +220,6 @@ public class TestAuditLogs {
     assertTrue("failed to stat file", st != null && st.isFile());
   }
 
-  /** test that access via Hftp puts proper entry in audit log */
-  @Test
-  public void testAuditHftp() throws Exception {
-    final Path file = new Path(fnames[0]);
-
-    final String hftpUri =
-      "hftp://" + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
-
-    HftpFileSystem hftpFs = null;
-
-    setupAuditLogs();
-    try {
-      hftpFs = (HftpFileSystem) new Path(hftpUri).getFileSystem(conf);
-      InputStream istream = hftpFs.open(file);
-      @SuppressWarnings("unused")
-      int val = istream.read();
-      istream.close();
-
-      verifyAuditLogs(true);
-    } finally {
-      if (hftpFs != null) hftpFs.close();
-    }
-  }
-
   /** test that denied access via webhdfs puts proper entry in audit log */
   @Test
   public void testAuditWebHdfsDenied() throws Exception {
@@ -301,11 +277,18 @@ public class TestAuditLogs {
     // Turn off the logs
     Logger logger = ((Log4JLogger) FSNamesystem.auditLog).getLogger();
     logger.setLevel(Level.OFF);
-    
+
+    // Close the appenders and force all logs to be flushed
+    Enumeration<?> appenders = logger.getAllAppenders();
+    while (appenders.hasMoreElements()) {
+      Appender appender = (Appender)appenders.nextElement();
+      appender.close();
+    }
+
     BufferedReader reader = new BufferedReader(new FileReader(auditLogFile));
     String line = null;
     boolean ret = true;
-   
+
     try {
       for (int i = 0; i < ndupe; i++) {
         line = reader.readLine();

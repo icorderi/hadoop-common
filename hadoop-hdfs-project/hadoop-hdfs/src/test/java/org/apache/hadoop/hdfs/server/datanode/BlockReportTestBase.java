@@ -93,7 +93,7 @@ public abstract class BlockReportTestBase {
   protected MiniDFSCluster cluster;
   private DistributedFileSystem fs;
 
-  private static Random rand = new Random(RAND_LIMIT);
+  private static final Random rand = new Random(RAND_LIMIT);
 
   private static Configuration conf;
 
@@ -171,9 +171,6 @@ public abstract class BlockReportTestBase {
    * Utility routine to send block reports to the NN, either in a single call
    * or reporting one storage per call.
    *
-   * @param dnR
-   * @param poolId
-   * @param reports
    * @throws IOException
    */
   protected abstract void sendBlockReports(DatanodeRegistration dnR, String poolId,
@@ -832,7 +829,7 @@ public abstract class BlockReportTestBase {
   }
 
   private class BlockChecker extends Thread {
-    Path filePath;
+    final Path filePath;
 
     public BlockChecker(final Path filePath) {
       this.filePath = filePath;

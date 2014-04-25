@@ -19,8 +19,11 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -51,6 +54,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.NMToken;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.PreemptionContainer;
 import org.apache.hadoop.yarn.api.records.PreemptionContract;
@@ -85,6 +89,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeRepo
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicyProvider;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
+
+import com.google.common.annotations.VisibleForTesting;
 
 @SuppressWarnings("unchecked")
 @Private
@@ -137,7 +143,14 @@ public class ApplicationMasterService extends AbstractService implements
     if (conf.getBoolean(
         CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION, 
         false)) {
-      refreshServiceAcls(conf, new RMPolicyProvider());
+      InputStream inputStream =
+          this.rmContext.getConfigurationProvider()
+              .getConfigurationInputStream(conf,
+                  YarnConfiguration.HADOOP_POLICY_CONFIGURATION_FILE);
+      if (inputStream != null) {
+        conf.addResource(inputStream);
+      }
+      refreshServiceAcls(conf, RMPolicyProvider.getInstance());
     }
     
     this.server.start();
@@ -275,10 +288,32 @@ public class ApplicationMasterService extends AbstractService implements
             .getMasterKey(applicationAttemptId).getEncoded()));        
       }
 
-      List<Container> containerList =
+      // For work-preserving AM restart, retrieve previous attempts' containers
+      // and corresponding NM tokens.
+      List<Container> transferredContainers =
           ((AbstractYarnScheduler) rScheduler)
             .getTransferredContainers(applicationAttemptId);
-      response.setContainersFromPreviousAttempt(containerList);
+      if (!transferredContainers.isEmpty()) {
+        response.setContainersFromPreviousAttempts(transferredContainers);
+        List<NMToken> nmTokens = new ArrayList<NMToken>();
+        for (Container container : transferredContainers) {
+          try {
+            nmTokens.add(rmContext.getNMTokenSecretManager()
+              .createAndGetNMToken(app.getUser(), applicationAttemptId,
+                container));
+          } catch (IllegalArgumentException e) {
+            // if it's a DNS issue, throw UnknowHostException directly and that
+            // will be automatically retried by RMProxy in RPC layer.
+            if (e.getCause() instanceof UnknownHostException) {
+              throw (UnknownHostException) e.getCause();
+            }
+          }
+        }
+        response.setNMTokensFromPreviousAttempts(nmTokens);
+        LOG.info("Application " + appID + " retrieved "
+            + transferredContainers.size() + " containers from previous"
+            + " attempts and " + nmTokens.size() + " NM tokens.");
+      }
       return response;
     }
   }
@@ -297,33 +332,37 @@ public class ApplicationMasterService extends AbstractService implements
 
     // Allow only one thread in AM to do finishApp at a time.
     synchronized (lock) {
+      if (!hasApplicationMasterRegistered(applicationAttemptId)) {
+        String message =
+            "Application Master is trying to unregister before registering for: "
+                + applicationAttemptId.getApplicationId();
+        LOG.error(message);
+        RMAuditLogger.logFailure(
+            this.rmContext.getRMApps()
+                .get(applicationAttemptId.getApplicationId()).getUser(),
+            AuditConstants.UNREGISTER_AM, "", "ApplicationMasterService",
+            message, applicationAttemptId.getApplicationId(),
+            applicationAttemptId);
+        throw new InvalidApplicationMasterRequestException(message);
+      }
       
       this.amLivelinessMonitor.receivedPing(applicationAttemptId);
 
       RMApp rmApp =
           rmContext.getRMApps().get(applicationAttemptId.getApplicationId());
 
-      if (rmApp.getApplicationSubmissionContext().getUnmanagedAM()) {
-        // No recovery supported yet for unmanaged AM. Send the unregister event
-        // and (falsely) acknowledge state-store write immediately.
-        rmContext.getDispatcher().getEventHandler().handle(
-          new RMAppAttemptUnregistrationEvent(applicationAttemptId, request
-              .getTrackingUrl(), request.getFinalApplicationStatus(), request
-              .getDiagnostics()));
+      if (rmApp.isAppFinalStateStored()) {
         return FinishApplicationMasterResponse.newInstance(true);
       }
 
-      // Not an unmanaged-AM.
-      if (rmApp.isAppSafeToTerminate()) {
-        return FinishApplicationMasterResponse.newInstance(true);
-      } else {
-        // keep sending the unregister event as RM may crash in the meanwhile.
-        rmContext.getDispatcher().getEventHandler().handle(
+      rmContext.getDispatcher().getEventHandler().handle(
           new RMAppAttemptUnregistrationEvent(applicationAttemptId, request
               .getTrackingUrl(), request.getFinalApplicationStatus(), request
               .getDiagnostics()));
-        return FinishApplicationMasterResponse.newInstance(false);
-      }
+
+      // For UnmanagedAMs, return true so they don't retry
+      return FinishApplicationMasterResponse.newInstance(
+          rmApp.getApplicationSubmissionContext().getUnmanagedAM());
     }
   }
 
@@ -397,6 +436,15 @@ public class ApplicationMasterService extends AbstractService implements
         return resync;
       }
 
+      //filter illegal progress values
+      float filteredProgress = request.getProgress();
+      if (Float.isNaN(filteredProgress) || filteredProgress == Float.NEGATIVE_INFINITY
+        || filteredProgress < 0) {
+         request.setProgress(0);
+      } else if (filteredProgress > 1 || filteredProgress == Float.POSITIVE_INFINITY) {
+        request.setProgress(1);
+      }
+
       // Send the status update to the appAttempt.
       this.rmContext.getDispatcher().getEventHandler().handle(
           new RMAppAttemptStatusupdateEvent(appAttemptId, request
@@ -409,10 +457,10 @@ public class ApplicationMasterService extends AbstractService implements
           request.getResourceBlacklistRequest();
       List<String> blacklistAdditions =
           (blacklistRequest != null) ?
-              blacklistRequest.getBlacklistAdditions() : null;
+              blacklistRequest.getBlacklistAdditions() : Collections.EMPTY_LIST;
       List<String> blacklistRemovals =
           (blacklistRequest != null) ?
-              blacklistRequest.getBlacklistRemovals() : null;
+              blacklistRequest.getBlacklistRemovals() : Collections.EMPTY_LIST;
 
       // sanity check
       try {
@@ -449,10 +497,17 @@ public class ApplicationMasterService extends AbstractService implements
           this.rScheduler.allocate(appAttemptId, ask, release, 
               blacklistAdditions, blacklistRemovals);
 
+      if (!blacklistAdditions.isEmpty() || !blacklistRemovals.isEmpty()) {
+        LOG.info("blacklist are updated in Scheduler." +
+            "blacklistAdditions: " + blacklistAdditions + ", " +
+            "blacklistRemovals: " + blacklistRemovals);
+      }
       RMAppAttempt appAttempt = app.getRMAppAttempt(appAttemptId);
-      
       AllocateResponse allocateResponse =
           recordFactory.newRecordInstance(AllocateResponse.class);
+      if (!allocation.getContainers().isEmpty()) {
+        allocateResponse.setNMTokens(allocation.getNMTokens());
+      }
 
       // update the response with the deltas of node status changes
       List<RMNode> updatedNodes = new ArrayList<RMNode>();
@@ -491,12 +546,6 @@ public class ApplicationMasterService extends AbstractService implements
       allocateResponse
           .setPreemptionMessage(generatePreemptionMessage(allocation));
 
-      // Adding NMTokens for allocated containers.
-      if (!allocation.getContainers().isEmpty()) {
-        allocateResponse.setNMTokens(rmContext.getNMTokenSecretManager()
-            .createAndGetNMTokens(app.getUser(), appAttemptId,
-                allocation.getContainers()));
-      }
       /*
        * As we are updating the response inside the lock object so we don't
        * need to worry about unregister call occurring in between (which
@@ -578,7 +627,8 @@ public class ApplicationMasterService extends AbstractService implements
 
   public void refreshServiceAcls(Configuration configuration, 
       PolicyProvider policyProvider) {
-    this.server.refreshServiceAcl(configuration, policyProvider);
+    this.server.refreshServiceAclWithLoadedConfiguration(configuration,
+        policyProvider);
   }
   
   @Override
@@ -603,5 +653,10 @@ public class ApplicationMasterService extends AbstractService implements
     public synchronized void setAllocateResponse(AllocateResponse response) {
       this.response = response;
     }
+  }
+
+  @VisibleForTesting
+  public Server getServer() {
+    return this.server;
   }
 }

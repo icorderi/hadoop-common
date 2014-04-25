@@ -18,10 +18,8 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.security;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
@@ -140,6 +138,19 @@ public class NMTokenSecretManagerInRM extends BaseNMTokenSecretManager {
     }
   }
 
+  public void clearNodeSetForAttempt(ApplicationAttemptId attemptId) {
+    super.writeLock.lock();
+    try {
+      HashSet<NodeId> nodeSet = this.appAttemptToNodeKeyMap.get(attemptId);
+      if (nodeSet != null) {
+        LOG.info("Clear node set for " + attemptId);
+        nodeSet.clear();
+      }
+    } finally {
+      super.writeLock.unlock();
+    }
+  }
+
   private void clearApplicationNMTokenKeys() {
     // We should clear all node entries from this set.
     // TODO : Once we have per node master key then it will change to only
@@ -177,35 +188,30 @@ public class NMTokenSecretManagerInRM extends BaseNMTokenSecretManager {
       activateNextMasterKey();
     }
   }
-  
-  public List<NMToken> createAndGetNMTokens(String applicationSubmitter,
-      ApplicationAttemptId appAttemptId, List<Container> containers) {
+
+  public NMToken createAndGetNMToken(String applicationSubmitter,
+      ApplicationAttemptId appAttemptId, Container container) {
     try {
       this.readLock.lock();
-      List<NMToken> nmTokens = new ArrayList<NMToken>();
       HashSet<NodeId> nodeSet = this.appAttemptToNodeKeyMap.get(appAttemptId);
+      NMToken nmToken = null;
       if (nodeSet != null) {
-        for (Container container : containers) {
-          if (!nodeSet.contains(container.getNodeId())) {
-            LOG.debug("Sending NMToken for nodeId : "
-                + container.getNodeId().toString()
-                + " for application attempt : " + appAttemptId.toString());
-            Token token = createNMToken(appAttemptId, container.getNodeId(),
-                applicationSubmitter);
-            NMToken nmToken =
-                NMToken.newInstance(container.getNodeId(), token);
-            nmTokens.add(nmToken);
-            // This will update the nmToken set.
-            nodeSet.add(container.getNodeId());
-          }
+        if (!nodeSet.contains(container.getNodeId())) {
+          LOG.info("Sending NMToken for nodeId : " + container.getNodeId()
+              + " for container : " + container.getId());
+          Token token =
+              createNMToken(container.getId().getApplicationAttemptId(),
+                container.getNodeId(), applicationSubmitter);
+          nmToken = NMToken.newInstance(container.getNodeId(), token);
+          nodeSet.add(container.getNodeId());
         }
       }
-      return nmTokens;
+      return nmToken;
     } finally {
       this.readLock.unlock();
     }
   }
-  
+
   public void registerApplicationAttempt(ApplicationAttemptId appAttemptId) {
     try {
       this.writeLock.lock();

@@ -18,8 +18,6 @@
 
 package org.apache.hadoop.mapreduce.v2.app;
 
-import org.apache.hadoop.mapreduce.v2.app.rm.preemption.NoopAMPreemptionPolicy;
-
 import static org.mockito.Matchers.anyFloat;
 import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.isA;
@@ -42,7 +40,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -56,6 +54,7 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.app.client.ClientService;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttemptStateInternal;
@@ -64,17 +63,20 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptContainerAssigned
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptKillEvent;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.JobImpl;
 import org.apache.hadoop.mapreduce.v2.app.job.impl.TaskAttemptImpl;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerFailedEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.RMContainerAllocator;
+import org.apache.hadoop.mapreduce.v2.app.rm.preemption.NoopAMPreemptionPolicy;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -105,6 +107,8 @@ import org.apache.hadoop.yarn.util.SystemClock;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+
+import com.google.common.base.Supplier;
 
 @SuppressWarnings("unchecked")
 public class TestRMContainerAllocator {
@@ -362,6 +366,59 @@ public class TestRMContainerAllocator {
         assigned, false);
   }
 
+  @Test(timeout = 30000)
+  public void testReducerRampdownDiagnostics() throws Exception {
+    LOG.info("Running tesReducerRampdownDiagnostics");
+
+    final Configuration conf = new Configuration();
+    conf.setFloat(MRJobConfig.COMPLETED_MAPS_FOR_REDUCE_SLOWSTART, 0.0f);
+    final MyResourceManager rm = new MyResourceManager(conf);
+    rm.start();
+    final DrainDispatcher dispatcher = (DrainDispatcher) rm.getRMContext()
+        .getDispatcher();
+    final RMApp app = rm.submitApp(1024);
+    dispatcher.await();
+
+    final String host = "host1";
+    final MockNM nm = rm.registerNode(String.format("%s:1234", host), 2048);
+    nm.nodeHeartbeat(true);
+    dispatcher.await();
+    final ApplicationAttemptId appAttemptId = app.getCurrentAppAttempt()
+        .getAppAttemptId();
+    rm.sendAMLaunched(appAttemptId);
+    dispatcher.await();
+    final JobId jobId = MRBuilderUtils
+        .newJobId(appAttemptId.getApplicationId(), 0);
+    final Job mockJob = mock(Job.class);
+    when(mockJob.getReport()).thenReturn(
+        MRBuilderUtils.newJobReport(jobId, "job", "user", JobState.RUNNING, 0,
+            0, 0, 0, 0, 0, 0, "jobfile", null, false, ""));
+    final MyContainerAllocator allocator = new MyContainerAllocator(rm, conf,
+        appAttemptId, mockJob);
+    // add resources to scheduler
+    dispatcher.await();
+
+    // create the container request
+    final String[] locations = new String[] { host };
+    allocator.sendRequest(createReq(jobId, 0, 1024, locations, false, true));
+    for (int i = 0; i < 1;) {
+      dispatcher.await();
+      i += allocator.schedule().size();
+      nm.nodeHeartbeat(true);
+    }
+
+    allocator.sendRequest(createReq(jobId, 0, 1024, locations, true, false));
+    while (allocator.getTaskAttemptKillEvents().size() == 0) {
+      dispatcher.await();
+      allocator.schedule().size();
+      nm.nodeHeartbeat(true);
+    }
+    final String killEventMessage = allocator.getTaskAttemptKillEvents().get(0)
+        .getMessage();
+    Assert.assertTrue("No reducer rampDown preemption message",
+        killEventMessage.contains(RMContainerAllocator.RAMPDOWN_DIAGNOSTIC));
+  }
+
   @Test
   public void testMapReduceScheduling() throws Exception {
 
@@ -528,7 +585,7 @@ public class TestRMContainerAllocator {
     MyContainerAllocator allocator = (MyContainerAllocator) mrApp
       .getContainerAllocator();
 
-    mrApp.waitForState(job, JobState.RUNNING);
+    mrApp.waitForInternalState((JobImpl) job, JobStateInternal.RUNNING);
 
     amDispatcher.await();
     // Wait till all map-attempts request for containers
@@ -680,7 +737,7 @@ public class TestRMContainerAllocator {
     MyContainerAllocator allocator = (MyContainerAllocator) mrApp
       .getContainerAllocator();
 
-    mrApp.waitForState(job, JobState.RUNNING);
+    mrApp.waitForInternalState((JobImpl)job, JobStateInternal.RUNNING);
 
     amDispatcher.await();
     // Wait till all map-attempts request for containers
@@ -1386,7 +1443,7 @@ public class TestRMContainerAllocator {
     static final List<JobUpdatedNodesEvent> jobUpdatedNodeEvents 
     = new ArrayList<JobUpdatedNodesEvent>();
     private MyResourceManager rm;
-
+    private boolean isUnregistered = false;
     private static AppContext createAppContext(
         ApplicationAttemptId appAttemptId, Job job) {
       AppContext context = mock(AppContext.class);
@@ -1478,6 +1535,7 @@ public class TestRMContainerAllocator {
 
     @Override
     protected void unregister() {
+      isUnregistered=true;
     }
 
     @Override
@@ -1500,7 +1558,15 @@ public class TestRMContainerAllocator {
     }
     
     // API to be used by tests
-    public List<TaskAttemptContainerAssignedEvent> schedule() {
+    public List<TaskAttemptContainerAssignedEvent> schedule()
+        throws Exception {
+      // before doing heartbeat with RM, drain all the outstanding events to
+      // ensure all the requests before this heartbeat is to be handled
+      GenericTestUtils.waitFor(new Supplier<Boolean>() {
+        public Boolean get() {
+          return eventQueue.isEmpty();
+        }
+      }, 100, 10000);
       // run the scheduler
       try {
         super.heartbeat();
@@ -1527,7 +1593,15 @@ public class TestRMContainerAllocator {
     protected void startAllocatorThread() {
       // override to NOT start thread
     }
-        
+    
+    @Override
+    protected boolean isApplicationMasterRegistered() {
+      return super.isApplicationMasterRegistered();
+    }
+    
+    public boolean isUnregistered() {
+      return isUnregistered;
+    }
   }
 
   @Test
@@ -1652,8 +1726,16 @@ public class TestRMContainerAllocator {
     RMApp app = rm.submitApp(1024);
     dispatcher.await();
 
+    // Make a node to register so as to launch the AM.
+    MockNM amNodeManager = rm.registerNode("amNM:1234", 2048);
+    amNodeManager.nodeHeartbeat(true);
+    dispatcher.await();
+
     ApplicationAttemptId appAttemptId = app.getCurrentAppAttempt()
         .getAppAttemptId();
+    rm.sendAMLaunched(appAttemptId);
+    dispatcher.await();
+
     JobId jobId = MRBuilderUtils.newJobId(appAttemptId.getApplicationId(), 0);
     Job job = mock(Job.class);
     when(job.getReport()).thenReturn(
@@ -1766,6 +1848,51 @@ public class TestRMContainerAllocator {
     TaskAttemptEvent abortedEvent = allocator.createContainerFinishedEvent(
         abortedStatus, attemptId);
     Assert.assertEquals(TaskAttemptEventType.TA_KILL, abortedEvent.getType());
+  }
+  
+  @Test
+  public void testUnregistrationOnlyIfRegistered() throws Exception {
+    Configuration conf = new Configuration();
+    final MyResourceManager rm = new MyResourceManager(conf);
+    rm.start();
+    DrainDispatcher rmDispatcher =
+        (DrainDispatcher) rm.getRMContext().getDispatcher();
+
+    // Submit the application
+    RMApp rmApp = rm.submitApp(1024);
+    rmDispatcher.await();
+
+    MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 11264);
+    amNodeManager.nodeHeartbeat(true);
+    rmDispatcher.await();
+
+    final ApplicationAttemptId appAttemptId =
+        rmApp.getCurrentAppAttempt().getAppAttemptId();
+    rm.sendAMLaunched(appAttemptId);
+    rmDispatcher.await();
+
+    MRApp mrApp =
+        new MRApp(appAttemptId, ContainerId.newInstance(appAttemptId, 0), 10,
+            0, false, this.getClass().getName(), true, 1) {
+          @Override
+          protected Dispatcher createDispatcher() {
+            return new DrainDispatcher();
+          }
+
+          protected ContainerAllocator createContainerAllocator(
+              ClientService clientService, AppContext context) {
+            return new MyContainerAllocator(rm, appAttemptId, context);
+          };
+        };
+
+    mrApp.submit(conf);
+    DrainDispatcher amDispatcher = (DrainDispatcher) mrApp.getDispatcher();
+    MyContainerAllocator allocator =
+        (MyContainerAllocator) mrApp.getContainerAllocator();
+    amDispatcher.await();
+    Assert.assertTrue(allocator.isApplicationMasterRegistered());
+    mrApp.stop();
+    Assert.assertTrue(allocator.isUnregistered());
   }
   
   public static void main(String[] args) throws Exception {

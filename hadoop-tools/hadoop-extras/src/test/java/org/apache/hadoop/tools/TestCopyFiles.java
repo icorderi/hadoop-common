@@ -280,7 +280,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {
@@ -310,7 +310,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {
@@ -340,7 +340,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 1, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).build();
       final FileSystem hdfs = cluster.getFileSystem();
       final String namenode = hdfs.getUri().toString();
       if (namenode.startsWith("hdfs://")) {
@@ -369,7 +369,7 @@ public class TestCopyFiles extends TestCase {
     try {
       Configuration conf = new Configuration();
       final FileSystem localfs = FileSystem.get(LOCAL_FS, conf);
-      cluster = new MiniDFSCluster(conf, 1, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).build();
       final FileSystem hdfs = cluster.getFileSystem();
       final String namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {
@@ -396,7 +396,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       final String namenode = hdfs.getUri().toString();
       if (namenode.startsWith("hdfs://")) {
@@ -456,7 +456,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       final String namenode = hdfs.getUri().toString();
       
@@ -614,7 +614,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {
@@ -639,7 +639,7 @@ public class TestCopyFiles extends TestCase {
     Configuration conf = new Configuration();
     MiniDFSCluster cluster = null;
     try {
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       String nnUri = FileSystem.getDefaultUri(conf).toString();
       FileSystem fs = FileSystem.get(URI.create(nnUri), conf);
 
@@ -791,7 +791,7 @@ public class TestCopyFiles extends TestCase {
     Configuration conf = new Configuration();
     MiniDFSCluster cluster = null;
     try {
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final String nnUri = FileSystem.getDefaultUri(conf).toString();
       final FileSystem fs = FileSystem.get(URI.create(nnUri), conf);
       final DistCpV1 distcp = new DistCpV1(conf);
@@ -891,71 +891,13 @@ public class TestCopyFiles extends TestCase {
     return home;
   }
 
-  public void testHftpAccessControl() throws Exception {
-    MiniDFSCluster cluster = null;
-    try {
-      final UserGroupInformation DFS_UGI = createUGI("dfs", true); 
-      final UserGroupInformation USER_UGI = createUGI("user", false); 
-
-      //start cluster by DFS_UGI
-      final Configuration dfsConf = new Configuration();
-      cluster = new MiniDFSCluster(dfsConf, 2, true, null);
-      cluster.waitActive();
-
-      final String httpAdd = dfsConf.get("dfs.http.address");
-      final URI nnURI = FileSystem.getDefaultUri(dfsConf);
-      final String nnUri = nnURI.toString();
-      FileSystem fs1 = DFS_UGI.doAs(new PrivilegedExceptionAction<FileSystem>() {
-        public FileSystem run() throws IOException {
-          return FileSystem.get(nnURI, dfsConf);
-        }
-      });
-      final Path home = 
-        createHomeDirectory(fs1, USER_UGI);
-      
-      //now, login as USER_UGI
-      final Configuration userConf = new Configuration();
-      final FileSystem fs = 
-        USER_UGI.doAs(new PrivilegedExceptionAction<FileSystem>() {
-        public FileSystem run() throws IOException {
-          return FileSystem.get(nnURI, userConf);
-        }
-      });
-      
-      final Path srcrootpath = new Path(home, "src_root"); 
-      final String srcrootdir =  srcrootpath.toString();
-      final Path dstrootpath = new Path(home, "dst_root"); 
-      final String dstrootdir =  dstrootpath.toString();
-      final DistCpV1 distcp = USER_UGI.doAs(new PrivilegedExceptionAction<DistCpV1>() {
-        public DistCpV1 run() {
-          return new DistCpV1(userConf);
-        }
-      });
-
-      FileSystem.mkdirs(fs, srcrootpath, new FsPermission((short)0700));
-      final String[] args = {"hftp://"+httpAdd+srcrootdir, nnUri+dstrootdir};
-
-      { //copy with permission 000, should fail
-        fs.setPermission(srcrootpath, new FsPermission((short)0));
-        USER_UGI.doAs(new PrivilegedExceptionAction<Void>() {
-          public Void run() throws Exception {
-            assertEquals(-3, ToolRunner.run(distcp, args));
-            return null;
-          }
-        });
-      }
-    } finally {
-      if (cluster != null) { cluster.shutdown(); }
-    }
-  }
-
   /** test -delete */
   public void testDelete() throws Exception {
     final Configuration conf = new Configuration();
     conf.setInt("fs.trash.interval", 60);
     MiniDFSCluster cluster = null;
     try {
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final URI nnURI = FileSystem.getDefaultUri(conf);
       final String nnUri = nnURI.toString();
       final FileSystem fs = FileSystem.get(URI.create(nnUri), conf);
@@ -1027,7 +969,7 @@ public class TestCopyFiles extends TestCase {
     try {
       Configuration conf = new Configuration();
       final FileSystem localfs = FileSystem.get(LOCAL_FS, conf);
-      cluster = new MiniDFSCluster(conf, 1, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).build();
       final FileSystem hdfs = cluster.getFileSystem();
       final String namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {
@@ -1060,7 +1002,7 @@ public class TestCopyFiles extends TestCase {
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
-      cluster = new MiniDFSCluster(conf, 2, true, null);
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       final FileSystem hdfs = cluster.getFileSystem();
       namenode = FileSystem.getDefaultUri(conf).toString();
       if (namenode.startsWith("hdfs://")) {

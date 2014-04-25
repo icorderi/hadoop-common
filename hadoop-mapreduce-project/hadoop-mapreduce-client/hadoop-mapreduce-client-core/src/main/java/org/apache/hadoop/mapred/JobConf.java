@@ -66,9 +66,10 @@ import org.apache.log4j.Level;
  *   </li>
  *   <li>
  *   While some job parameters are straight-forward to set 
- *   (e.g. {@link #setNumReduceTasks(int)}), some parameters interact subtly 
- *   rest of the framework and/or job-configuration and is relatively more 
- *   complex for the user to control finely (e.g. {@link #setNumMapTasks(int)}).
+ *   (e.g. {@link #setNumReduceTasks(int)}), some parameters interact subtly
+ *   with the rest of the framework and/or job-configuration and is relatively
+ *   more complex for the user to control finely
+ *   (e.g. {@link #setNumMapTasks(int)}).
  *   </li>
  * </ol></p>
  * 
@@ -746,7 +747,6 @@ public class JobConf extends Configuration {
 
   /**
    * Should the map outputs be compressed before transfer?
-   * Uses the SequenceFile compression.
    * 
    * @param compress should the map outputs be compressed?
    */

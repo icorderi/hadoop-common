@@ -27,6 +27,7 @@ import static org.junit.Assert.fail;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOException;
@@ -68,6 +69,8 @@ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.hdfs.util.XMLUtils.InvalidXmlException;
+import org.apache.hadoop.hdfs.util.XMLUtils.Stanza;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
@@ -76,6 +79,8 @@ import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
 import org.junit.Test;
 import org.mockito.Mockito;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.SAXException;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
@@ -88,7 +93,42 @@ public class TestEditLog {
   static {
     ((Log4JLogger)FSEditLog.LOG).getLogger().setLevel(Level.ALL);
   }
-  
+
+  /**
+   * A garbage mkdir op which is used for testing
+   * {@link EditLogFileInputStream#scanEditLog(File)}
+   */
+  public static class GarbageMkdirOp extends FSEditLogOp {
+    public GarbageMkdirOp() {
+      super(FSEditLogOpCodes.OP_MKDIR);
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      throw new IOException("cannot decode GarbageMkdirOp");
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      // write in some garbage content
+      Random random = new Random();
+      byte[] content = new byte[random.nextInt(16) + 1];
+      random.nextBytes(content);
+      out.write(content);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      throw new UnsupportedOperationException(
+          "Not supported for GarbageMkdirOp");
+    }
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      throw new UnsupportedOperationException(
+          "Not supported for GarbageMkdirOp");
+    }
+  }
+
   static final Log LOG = LogFactory.getLog(TestEditLog.class);
   
   static final int NUM_DATA_NODES = 0;
@@ -133,11 +173,11 @@ public class TestEditLog {
   // an object that does a bunch of transactions
   //
   static class Transactions implements Runnable {
-    FSNamesystem namesystem;
-    int numTransactions;
-    short replication = 3;
-    long blockSize = 64;
-    int startIndex;
+    final FSNamesystem namesystem;
+    final int numTransactions;
+    final short replication = 3;
+    final long blockSize = 64;
+    final int startIndex;
 
     Transactions(FSNamesystem ns, int numTx, int startIdx) {
       namesystem = ns;
@@ -218,7 +258,7 @@ public class TestEditLog {
   
   private long testLoad(byte[] data, FSNamesystem namesys) throws IOException {
     FSEditLogLoader loader = new FSEditLogLoader(namesys, 0);
-    return loader.loadFSEdits(new EditLogByteInputStream(data), 1, null);
+    return loader.loadFSEdits(new EditLogByteInputStream(data), 1);
   }
 
   /**
@@ -369,7 +409,7 @@ public class TestEditLog {
         
         System.out.println("Verifying file: " + editFile);
         long numEdits = loader.loadFSEdits(
-            new EditLogFileInputStream(editFile), 3, null);
+            new EditLogFileInputStream(editFile), 3);
         int numLeases = namesystem.leaseManager.countLease();
         System.out.println("Number of outstanding leases " + numLeases);
         assertEquals(0, numLeases);
@@ -767,7 +807,7 @@ public class TestEditLog {
 
       EditLogFileOutputStream stream = new EditLogFileOutputStream(conf, log, 1024);
       try {
-        stream.create();
+        stream.create(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
         if (!inBothDirs) {
           break;
         }
@@ -808,8 +848,8 @@ public class TestEditLog {
 
   
   private static class EditLogByteInputStream extends EditLogInputStream {
-    private InputStream input;
-    private long len;
+    private final InputStream input;
+    private final long len;
     private int version;
     private FSEditLogOp.Reader reader = null;
     private FSEditLogLoader.PositionTrackingInputStream tracker = null;
@@ -820,7 +860,7 @@ public class TestEditLog {
 
       BufferedInputStream bin = new BufferedInputStream(input);
       DataInputStream in = new DataInputStream(bin);
-      version = EditLogFileInputStream.readLogVersion(in);
+      version = EditLogFileInputStream.readLogVersion(in, true);
       tracker = new FSEditLogLoader.PositionTrackingInputStream(in);
       in = new DataInputStream(tracker);
             
@@ -853,7 +893,7 @@ public class TestEditLog {
     }
 
     @Override
-    public int getVersion() throws IOException {
+    public int getVersion(boolean verifyVersion) throws IOException {
       return version;
     }
 
@@ -1019,11 +1059,11 @@ public class TestEditLog {
         assertTrue("bad spec: " + logSpec, m.matches());
         if (m.group(2) == null) {
           files.add(NNStorage.getInProgressEditsFileName(
-              Long.valueOf(m.group(1))));
+              Long.parseLong(m.group(1))));
         } else {
           files.add(NNStorage.getFinalizedEditsFileName(
-              Long.valueOf(m.group(1)),
-              Long.valueOf(m.group(2))));
+              Long.parseLong(m.group(1)),
+              Long.parseLong(m.group(2))));
         }
       }
       StorageDirectory sd = FSImageTestUtil.mockStorageDirectory(
@@ -1237,7 +1277,7 @@ public class TestEditLog {
     EditLogFileInputStream elfis = null;
     try {
       elfos = new EditLogFileOutputStream(new Configuration(), TEST_LOG_NAME, 0);
-      elfos.create();
+      elfos.create(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
       elfos.writeRaw(garbage, 0, garbage.length);
       elfos.setReadyToFlush();
       elfos.flushAndSync(true);

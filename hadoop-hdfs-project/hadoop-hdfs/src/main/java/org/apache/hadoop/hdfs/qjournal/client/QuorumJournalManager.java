@@ -86,6 +86,7 @@ public class QuorumJournalManager implements JournalManager {
   private static final int FINALIZE_TIMEOUT_MS          = 60000;
   private static final int PRE_UPGRADE_TIMEOUT_MS       = 60000;
   private static final int ROLL_BACK_TIMEOUT_MS         = 60000;
+  private static final int DISCARD_SEGMENTS_TIMEOUT_MS  = 60000;
   private static final int UPGRADE_TIMEOUT_MS           = 60000;
   private static final int GET_JOURNAL_CTIME_TIMEOUT_MS = 60000;
   
@@ -393,10 +394,12 @@ public class QuorumJournalManager implements JournalManager {
   }
   
   @Override
-  public EditLogOutputStream startLogSegment(long txId) throws IOException {
+  public EditLogOutputStream startLogSegment(long txId, int layoutVersion)
+      throws IOException {
     Preconditions.checkState(isActiveWriter,
         "must recover segments before starting a new one");
-    QuorumCall<AsyncLogger,Void> q = loggers.startLogSegment(txId);
+    QuorumCall<AsyncLogger, Void> q = loggers.startLogSegment(txId,
+        layoutVersion);
     loggers.waitForWriteQuorum(q, startSegmentTimeoutMs,
         "startLogSegment(" + txId + ")");
     return new QuorumOutputStream(loggers, txId,
@@ -568,7 +571,11 @@ public class QuorumJournalManager implements JournalManager {
       
       // Either they all return the same thing or this call fails, so we can
       // just return the first result.
-      DFSUtil.assertAllResultsEqual(call.getResults().values());
+      try {
+        DFSUtil.assertAllResultsEqual(call.getResults().values());
+      } catch (AssertionError ae) {
+        throw new IOException("Results differed for canRollBack", ae);
+      }
       for (Boolean result : call.getResults().values()) {
         return result;
       }
@@ -601,6 +608,25 @@ public class QuorumJournalManager implements JournalManager {
   }
   
   @Override
+  public void discardSegments(long startTxId) throws IOException {
+    QuorumCall<AsyncLogger, Void> call = loggers.discardSegments(startTxId);
+    try {
+      call.waitFor(loggers.size(), loggers.size(), 0,
+          DISCARD_SEGMENTS_TIMEOUT_MS, "discardSegments");
+      if (call.countExceptions() > 0) {
+        call.rethrowException(
+            "Could not perform discardSegments of one or more JournalNodes");
+      }
+    } catch (InterruptedException e) {
+      throw new IOException(
+          "Interrupted waiting for discardSegments() response");
+    } catch (TimeoutException e) {
+      throw new IOException(
+          "Timed out waiting for discardSegments() response");
+    }
+  }
+  
+  @Override
   public long getJournalCTime() throws IOException {
     QuorumCall<AsyncLogger, Long> call = loggers.getJournalCTime();
     try {
@@ -614,7 +640,11 @@ public class QuorumJournalManager implements JournalManager {
       
       // Either they all return the same thing or this call fails, so we can
       // just return the first result.
-      DFSUtil.assertAllResultsEqual(call.getResults().values());
+      try {
+        DFSUtil.assertAllResultsEqual(call.getResults().values());
+      } catch (AssertionError ae) {
+        throw new IOException("Results differed for getJournalCTime", ae);
+      }
       for (Long result : call.getResults().values()) {
         return result;
       }

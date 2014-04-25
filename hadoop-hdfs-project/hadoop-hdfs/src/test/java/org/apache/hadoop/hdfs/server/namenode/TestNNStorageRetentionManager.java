@@ -34,6 +34,7 @@ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImageStorageInspector.FSImageFile;
 import org.apache.hadoop.hdfs.server.namenode.FileJournalManager.EditLogFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorageRetentionManager.StoragePurger;
 import org.junit.Assert;
 import org.junit.Before;
@@ -50,7 +51,7 @@ import com.google.common.collect.Sets;
 
 
 public class TestNNStorageRetentionManager {
-  Configuration conf = new Configuration();
+  final Configuration conf = new Configuration();
 
   /**
    * For the purpose of this test, purge as many edits as we can 
@@ -239,7 +240,7 @@ public class TestNNStorageRetentionManager {
     // Ask the manager to purge files we don't need any more
     new NNStorageRetentionManager(conf,
         tc.mockStorage(), tc.mockEditLog(mockPurger), mockPurger)
-      .purgeOldStorage();
+      .purgeOldStorage(NameNodeFile.IMAGE);
     
     // Verify that it asked the purger to remove the correct files
     Mockito.verify(mockPurger, Mockito.atLeast(0))
@@ -267,13 +268,13 @@ public class TestNNStorageRetentionManager {
   }
   
   private class TestCaseDescription {
-    private Map<File, FakeRoot> dirRoots = Maps.newHashMap();
-    private Set<File> expectedPurgedLogs = Sets.newLinkedHashSet();
-    private Set<File> expectedPurgedImages = Sets.newLinkedHashSet();
+    private final Map<File, FakeRoot> dirRoots = Maps.newLinkedHashMap();
+    private final Set<File> expectedPurgedLogs = Sets.newLinkedHashSet();
+    private final Set<File> expectedPurgedImages = Sets.newLinkedHashSet();
     
     private class FakeRoot {
-      NameNodeDirType type;
-      List<File> files;
+      final NameNodeDirType type;
+      final List<File> files;
       
       FakeRoot(NameNodeDirType type) {
         this.type = type;
@@ -360,7 +361,7 @@ public class TestNNStorageRetentionManager {
         public Void answer(InvocationOnMock invocation) throws Throwable {
           Object[] args = invocation.getArguments();
           journalSet.selectInputStreams((Collection<EditLogInputStream>)args[0],
-              (long)((Long)args[1]), (boolean)((Boolean)args[2]));
+              (Long)args[1], (Boolean)args[2]);
           return null;
         }
       }).when(mockLog).selectInputStreams(Mockito.anyCollection(),

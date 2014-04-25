@@ -37,6 +37,7 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
 import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.ContentSummary;
@@ -48,7 +49,8 @@ import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnresolvedLinkException;
-import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.ha.HAServiceStatus;
@@ -60,20 +62,23 @@ import org.apache.hadoop.ha.protocolPB.HAServiceProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HDFSPolicyProvider;
+import org.apache.hadoop.hdfs.protocol.AclException;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
-import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
 import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.FSLimitException;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
@@ -81,6 +86,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
@@ -136,6 +142,9 @@ import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolP
 import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolServerSideTranslatorPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.proto.RefreshCallQueueProtocolProtos.RefreshCallQueueProtocolService;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.tools.proto.GetUserMappingsProtocolProtos.GetUserMappingsProtocolService;
@@ -213,6 +222,11 @@ class NameNodeRpcServer implements NamenodeProtocols {
     BlockingService refreshUserMappingService = RefreshUserMappingsProtocolService
         .newReflectiveBlockingService(refreshUserMappingXlator);
 
+    RefreshCallQueueProtocolServerSideTranslatorPB refreshCallQueueXlator = 
+        new RefreshCallQueueProtocolServerSideTranslatorPB(this);
+    BlockingService refreshCallQueueService = RefreshCallQueueProtocolService
+        .newReflectiveBlockingService(refreshCallQueueXlator);
+
     GetUserMappingsProtocolServerSideTranslatorPB getUserMappingXlator = 
         new GetUserMappingsProtocolServerSideTranslatorPB(this);
     BlockingService getUserMappingService = GetUserMappingsProtocolService
@@ -259,6 +273,9 @@ class NameNodeRpcServer implements NamenodeProtocols {
           refreshAuthService, serviceRpcServer);
       DFSUtil.addPBProtocol(conf, RefreshUserMappingsProtocolPB.class, 
           refreshUserMappingService, serviceRpcServer);
+      // We support Refreshing call queue here in case the client RPC queue is full
+      DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+          refreshCallQueueService, serviceRpcServer);
       DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class, 
           getUserMappingService, serviceRpcServer);
   
@@ -301,6 +318,8 @@ class NameNodeRpcServer implements NamenodeProtocols {
         refreshAuthService, clientRpcServer);
     DFSUtil.addPBProtocol(conf, RefreshUserMappingsProtocolPB.class, 
         refreshUserMappingService, clientRpcServer);
+    DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+        refreshCallQueueService, clientRpcServer);
     DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class, 
         getUserMappingService, clientRpcServer);
 
@@ -339,13 +358,22 @@ class NameNodeRpcServer implements NamenodeProtocols {
         InvalidToken.class,
         LeaseExpiredException.class,
         NSQuotaExceededException.class,
-        DSQuotaExceededException.class);
+        DSQuotaExceededException.class,
+        AclException.class,
+        FSLimitException.PathComponentTooLongException.class,
+        FSLimitException.MaxDirectoryItemsExceededException.class);
  }
 
   /** Allow access to the client RPC server for testing */
   @VisibleForTesting
   RPC.Server getClientRpcServer() {
     return clientRpcServer;
+  }
+  
+  /** Allow access to the service RPC server for testing */
+  @VisibleForTesting
+  RPC.Server getServiceRpcServer() {
+    return serviceRpcServer;
   }
   
   /**
@@ -859,6 +887,21 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
+  public RollingUpgradeInfo rollingUpgrade(RollingUpgradeAction action) throws IOException {
+    LOG.info("rollingUpgrade " + action);
+    switch(action) {
+    case QUERY:
+      return namesystem.queryRollingUpgrade();
+    case PREPARE:
+      return namesystem.startRollingUpgrade();
+    case FINALIZE:
+      return namesystem.finalizeRollingUpgrade();
+    default:
+      throw new UnsupportedActionException(action + " is not yet supported.");
+    }
+  }
+
+  @Override // ClientProtocol
   public void metaSave(String filename) throws IOException {
     namesystem.metaSave(filename);
   }
@@ -956,7 +999,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // DatanodeProtocol
   public DatanodeRegistration registerDatanode(DatanodeRegistration nodeReg)
       throws IOException {
-    verifyLayoutVersion(nodeReg.getVersion());
     verifySoftwareVersion(nodeReg);
     namesystem.registerDatanode(nodeReg);
     return nodeReg;
@@ -986,6 +1028,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     for(StorageBlockReport r : reports) {
       final BlockListAsLongs blocks = new BlockListAsLongs(r.getBlocks());
       hasStaleStorages = bm.processReport(nodeReg, r.getStorage(), poolId, blocks);
+      metrics.incrStorageBlockReportOps();
     }
 
     if (nn.getFSImage().isUpgradeFinalized() &&
@@ -1058,13 +1101,15 @@ class NameNodeRpcServer implements NamenodeProtocols {
    * @param nodeReg node registration
    * @throws UnregisteredNodeException if the registration is invalid
    */
-  void verifyRequest(NodeRegistration nodeReg) throws IOException {
-    verifyLayoutVersion(nodeReg.getVersion());
-    if (!namesystem.getRegistrationID().equals(nodeReg.getRegistrationID())) {
-      LOG.warn("Invalid registrationID - expected: "
-          + namesystem.getRegistrationID() + " received: "
-          + nodeReg.getRegistrationID());
-      throw new UnregisteredNodeException(nodeReg);
+  private void verifyRequest(NodeRegistration nodeReg) throws IOException {
+    // verify registration ID
+    final String id = nodeReg.getRegistrationID();
+    final String expectedID = namesystem.getRegistrationID();
+    if (!expectedID.equals(id)) {
+      LOG.warn("Registration IDs mismatched: the "
+          + nodeReg.getClass().getSimpleName() + " ID is " + id
+          + " but the expected ID is " + expectedID);
+       throw new UnregisteredNodeException(nodeReg);
     }
   }
 
@@ -1092,6 +1137,17 @@ class NameNodeRpcServer implements NamenodeProtocols {
     LOG.info("Refreshing SuperUser proxy group mapping list ");
 
     ProxyUsers.refreshSuperUserGroupsConfiguration();
+  }
+
+  @Override // RefreshCallQueueProtocol
+  public void refreshCallQueue() {
+    LOG.info("Refreshing call queue.");
+
+    Configuration conf = new Configuration();
+    clientRpcServer.refreshCallQueue(conf);
+    if (this.serviceRpcServer != null) {
+      serviceRpcServer.refreshCallQueue(conf);
+    }
   }
   
   @Override // GetUserMappingsProtocol
@@ -1130,13 +1186,13 @@ class NameNodeRpcServer implements NamenodeProtocols {
 
   /**
    * Verify version.
-   * 
-   * @param version
-   * @throws IOException
+   * @param version layout version
+   * @throws IOException on layout version mismatch
    */
   void verifyLayoutVersion(int version) throws IOException {
-    if (version != HdfsConstants.LAYOUT_VERSION)
-      throw new IncorrectVersionException(version, "data node");
+    if (version != HdfsConstants.NAMENODE_LAYOUT_VERSION)
+      throw new IncorrectVersionException(
+          HdfsConstants.NAMENODE_LAYOUT_VERSION, version, "data node");
   }
   
   private void verifySoftwareVersion(DatanodeRegistration dnReg)
@@ -1289,6 +1345,38 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public BatchedEntries<CachePoolEntry> listCachePools(String prevKey)
       throws IOException {
     return namesystem.listCachePools(prevKey != null ? prevKey : "");
+  }
+
+  @Override
+  public void modifyAclEntries(String src, List<AclEntry> aclSpec)
+      throws IOException {
+    namesystem.modifyAclEntries(src, aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(String src, List<AclEntry> aclSpec)
+      throws IOException {
+    namesystem.removeAclEntries(src, aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(String src) throws IOException {
+    namesystem.removeDefaultAcl(src);
+  }
+
+  @Override
+  public void removeAcl(String src) throws IOException {
+    namesystem.removeAcl(src);
+  }
+
+  @Override
+  public void setAcl(String src, List<AclEntry> aclSpec) throws IOException {
+    namesystem.setAcl(src, aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(String src) throws IOException {
+    return namesystem.getAclStatus(src);
   }
 }
 

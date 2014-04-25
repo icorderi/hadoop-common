@@ -105,18 +105,21 @@ public class Token<T extends TokenIdentifier> implements Writable {
     return identifier;
   }
   
-  private static synchronized Class<? extends TokenIdentifier>
+  private static Class<? extends TokenIdentifier>
       getClassForIdentifier(Text kind) {
-    if (tokenKindMap == null) {
-      tokenKindMap = Maps.newHashMap();
-      for (TokenIdentifier id : ServiceLoader.load(TokenIdentifier.class)) {
-        tokenKindMap.put(id.getKind(), id.getClass());
+    Class<? extends TokenIdentifier> cls = null;
+    synchronized (Token.class) {
+      if (tokenKindMap == null) {
+        tokenKindMap = Maps.newHashMap();
+        for (TokenIdentifier id : ServiceLoader.load(TokenIdentifier.class)) {
+          tokenKindMap.put(id.getKind(), id.getClass());
+        }
       }
+      cls = tokenKindMap.get(kind);
     }
-    Class<? extends TokenIdentifier> cls = tokenKindMap.get(kind);
     if (cls == null) {
       LOG.warn("Cannot find class for token kind " + kind);
-       return null;
+      return null;
     }
     return cls;
   }
@@ -159,7 +162,7 @@ public class Token<T extends TokenIdentifier> implements Writable {
 
   /**
    * Set the token kind. This is only intended to be used by services that
-   * wrap another service's token, such as HFTP wrapping HDFS.
+   * wrap another service's token.
    * @param newKind
    */
   @InterfaceAudience.Private

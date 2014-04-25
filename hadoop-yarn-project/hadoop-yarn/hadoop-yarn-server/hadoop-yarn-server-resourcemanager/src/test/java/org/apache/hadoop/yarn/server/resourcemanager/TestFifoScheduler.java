@@ -22,7 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -89,6 +89,38 @@ public class TestFifoScheduler {
       assertTrue("The thrown exception is not the expected one.",
         e.getMessage().startsWith(
           "Invalid resource scheduler memory"));
+    }
+  }
+  
+  @Test
+  public void testAllocateContainerOnNodeWithoutOffSwitchSpecified()
+      throws Exception {
+    Logger rootLogger = LogManager.getRootLogger();
+    rootLogger.setLevel(Level.DEBUG);
+    
+    MockRM rm = new MockRM(conf);
+    rm.start();
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
+
+    RMApp app1 = rm.submitApp(2048);
+    // kick the scheduling, 2 GB given to AM1, remaining 4GB on nm1
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+    MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    am1.registerAppAttempt();
+
+    // add request for containers
+    List<ResourceRequest> requests = new ArrayList<ResourceRequest>();
+    requests.add(am1.createResourceReq("127.0.0.1", 1 * GB, 1, 1));
+    requests.add(am1.createResourceReq("/default-rack", 1 * GB, 1, 1));
+    am1.allocate(requests, null); // send the request
+
+    try {
+      // kick the schedule
+      nm1.nodeHeartbeat(true);
+    } catch (NullPointerException e) {
+      Assert.fail("NPE when allocating container on node but "
+          + "forget to set off-switch request should be handled");
     }
   }
 

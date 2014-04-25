@@ -151,12 +151,7 @@ public class INodeFile extends INodeWithAdditionalFields
    * otherwise, return null.
    */
   public final FileUnderConstructionFeature getFileUnderConstructionFeature() {
-    for (Feature f : features) {
-      if (f instanceof FileUnderConstructionFeature) {
-        return (FileUnderConstructionFeature) f;
-      }
-    }
-    return null;
+    return getFeature(FileUnderConstructionFeature.class);
   }
 
   /** Is this file under construction? */
@@ -252,7 +247,7 @@ public class INodeFile extends INodeWithAdditionalFields
   
   /* Start of Snapshot Feature */
 
-  private FileWithSnapshotFeature addSnapshotFeature(FileDiffList diffs) {
+  public FileWithSnapshotFeature addSnapshotFeature(FileDiffList diffs) {
     Preconditions.checkState(!isWithSnapshot(), 
         "File is already with snapshot");
     FileWithSnapshotFeature sf = new FileWithSnapshotFeature(diffs);
@@ -265,12 +260,7 @@ public class INodeFile extends INodeWithAdditionalFields
    * otherwise, return null.
    */
   public final FileWithSnapshotFeature getFileWithSnapshotFeature() {
-    for (Feature f: features) {
-      if (f instanceof FileWithSnapshotFeature) {
-        return (FileWithSnapshotFeature) f;
-      }
-    }
-    return null;
+    return getFeature(FileWithSnapshotFeature.class);
   }
 
   /** Is this file has the snapshot feature? */
@@ -445,17 +435,19 @@ public class INodeFile extends INodeWithAdditionalFields
           removedINodes, countDiffChange);
     }
     Quota.Counts counts = Quota.Counts.newInstance();
-    if (snapshot == CURRENT_STATE_ID && priorSnapshotId == NO_SNAPSHOT_ID) {
-      // this only happens when deleting the current file and the file is not
-      // in any snapshot
-      computeQuotaUsage(counts, false);
-      destroyAndCollectBlocks(collectedBlocks, removedINodes);
-    } else if (snapshot == CURRENT_STATE_ID && priorSnapshotId != NO_SNAPSHOT_ID) {
-      // when deleting the current file and the file is in snapshot, we should
-      // clean the 0-sized block if the file is UC
-      FileUnderConstructionFeature uc = getFileUnderConstructionFeature();
-      if (uc != null) {
-        uc.cleanZeroSizeBlock(this, collectedBlocks);
+    if (snapshot == CURRENT_STATE_ID) {
+      if (priorSnapshotId == NO_SNAPSHOT_ID) {
+        // this only happens when deleting the current file and the file is not
+        // in any snapshot
+        computeQuotaUsage(counts, false);
+        destroyAndCollectBlocks(collectedBlocks, removedINodes);
+      } else {
+        // when deleting the current file and the file is in snapshot, we should
+        // clean the 0-sized block if the file is UC
+        FileUnderConstructionFeature uc = getFileUnderConstructionFeature();
+        if (uc != null) {
+          uc.cleanZeroSizeBlock(this, collectedBlocks);
+        }
       }
     }
     return counts;

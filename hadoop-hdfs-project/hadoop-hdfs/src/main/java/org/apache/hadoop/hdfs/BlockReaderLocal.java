@@ -17,25 +17,21 @@
  */
 package org.apache.hadoop.hdfs;
 
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.EnumSet;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.ReadOption;
-import org.apache.hadoop.hdfs.client.ClientMmap;
 import org.apache.hadoop.hdfs.DFSClient.Conf;
-import org.apache.hadoop.hdfs.client.ClientMmapManager;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
+import org.apache.hadoop.hdfs.shortcircuit.ClientMmap;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitReplica;
 import org.apache.hadoop.hdfs.util.DirectBufferPool;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.DataChecksum;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -60,19 +56,15 @@ import com.google.common.base.Preconditions;
 class BlockReaderLocal implements BlockReader {
   static final Log LOG = LogFactory.getLog(BlockReaderLocal.class);
 
-  private static DirectBufferPool bufferPool = new DirectBufferPool();
+  private static final DirectBufferPool bufferPool = new DirectBufferPool();
 
   public static class Builder {
-    private int bufferSize;
+    private final int bufferSize;
     private boolean verifyChecksum;
     private int maxReadahead;
     private String filename;
-    private FileInputStream streams[];
+    private ShortCircuitReplica replica;
     private long dataPos;
-    private DatanodeID datanodeID;
-    private FileInputStreamCache fisCache;
-    private boolean mlocked;
-    private BlockMetadataHeader header;
     private ExtendedBlock block;
 
     public Builder(Conf conf) {
@@ -99,33 +91,13 @@ class BlockReaderLocal implements BlockReader {
       return this;
     }
 
-    public Builder setStreams(FileInputStream streams[]) {
-      this.streams = streams;
+    public Builder setShortCircuitReplica(ShortCircuitReplica replica) {
+      this.replica = replica;
       return this;
     }
 
     public Builder setStartOffset(long startOffset) {
       this.dataPos = Math.max(0, startOffset);
-      return this;
-    }
-
-    public Builder setDatanodeID(DatanodeID datanodeID) {
-      this.datanodeID = datanodeID;
-      return this;
-    }
-
-    public Builder setFileInputStreamCache(FileInputStreamCache fisCache) {
-      this.fisCache = fisCache;
-      return this;
-    }
-
-    public Builder setMlocked(boolean mlocked) {
-      this.mlocked = mlocked;
-      return this;
-    }
-
-    public Builder setBlockMetadataHeader(BlockMetadataHeader header) {
-      this.header = header;
       return this;
     }
 
@@ -135,9 +107,7 @@ class BlockReaderLocal implements BlockReader {
     }
 
     public BlockReaderLocal build() {
-      Preconditions.checkNotNull(streams);
-      Preconditions.checkArgument(streams.length == 2);
-      Preconditions.checkNotNull(header);
+      Preconditions.checkNotNull(replica);
       return new BlockReaderLocal(this);
     }
   }
@@ -147,7 +117,7 @@ class BlockReaderLocal implements BlockReader {
   /**
    * Pair of streams for this block.
    */
-  private final FileInputStream streams[];
+  private final ShortCircuitReplica replica;
 
   /**
    * The data FileChannel.
@@ -178,19 +148,9 @@ class BlockReaderLocal implements BlockReader {
   private final boolean verifyChecksum;
 
   /**
-   * If true, this block is mlocked on the DataNode.
-   */
-  private final AtomicBoolean mlocked;
-
-  /**
    * Name of the block, for logging purposes.
    */
   private final String filename;
-
-  /**
-   * DataNode which contained this block.
-   */
-  private final DatanodeID datanodeID;
   
   /**
    * Block ID and Block Pool ID.
@@ -200,18 +160,12 @@ class BlockReaderLocal implements BlockReader {
   /**
    * Cache of Checksum#bytesPerChecksum.
    */
-  private int bytesPerChecksum;
+  private final int bytesPerChecksum;
 
   /**
    * Cache of Checksum#checksumSize.
    */
-  private int checksumSize;
-
-  /**
-   * FileInputStream cache to return the streams to upon closing,
-   * or null if we should just close them unconditionally.
-   */
-  private final FileInputStreamCache fisCache;
+  private final int checksumSize;
 
   /**
    * Maximum number of chunks to allocate.
@@ -228,7 +182,7 @@ class BlockReaderLocal implements BlockReader {
 
   /**
    * Maximum amount of readahead we'll do.  This will always be at least the,
-   * size of a single chunk, even if {@link zeroReadaheadRequested} is true.
+   * size of a single chunk, even if {@link #zeroReadaheadRequested} is true.
    * The reason is because we need to do a certain amount of buffering in order
    * to do checksumming.
    * 
@@ -237,9 +191,7 @@ class BlockReaderLocal implements BlockReader {
    * The rationale is that allocating a lot of buffers of different sizes would
    * make it very difficult for the DirectBufferPool to re-use buffers. 
    */
-  private int maxReadaheadLength;
-
-  private ClientMmap clientMmap;
+  private final int maxReadaheadLength;
 
   /**
    * Buffers data starting at the current dataPos and extending on
@@ -257,20 +209,16 @@ class BlockReaderLocal implements BlockReader {
    */
   private ByteBuffer checksumBuf;
 
-  private boolean mmapDisabled = false;
-
   private BlockReaderLocal(Builder builder) {
-    this.streams = builder.streams;
-    this.dataIn = builder.streams[0].getChannel();
+    this.replica = builder.replica;
+    this.dataIn = replica.getDataStream().getChannel();
     this.dataPos = builder.dataPos;
-    this.checksumIn = builder.streams[1].getChannel();
-    this.checksum = builder.header.getChecksum();
+    this.checksumIn = replica.getMetaStream().getChannel();
+    BlockMetadataHeader header = builder.replica.getMetaHeader();
+    this.checksum = header.getChecksum();
     this.verifyChecksum = builder.verifyChecksum &&
         (this.checksum.getChecksumType().id != DataChecksum.CHECKSUM_NULL);
-    this.mlocked = new AtomicBoolean(builder.mlocked);
     this.filename = builder.filename;
-    this.datanodeID = builder.datanodeID;
-    this.fisCache = builder.fisCache;
     this.block = builder.block;
     this.bytesPerChecksum = checksum.getBytesPerChecksum();
     this.checksumSize = checksum.getChecksumSize();
@@ -326,8 +274,7 @@ class BlockReaderLocal implements BlockReader {
     }
   }
 
-  private synchronized int drainDataBuf(ByteBuffer buf)
-      throws IOException {
+  private synchronized int drainDataBuf(ByteBuffer buf) {
     if (dataBuf == null) return -1;
     int oldLimit = dataBuf.limit();
     int nRead = Math.min(dataBuf.remaining(), buf.remaining());
@@ -401,42 +348,55 @@ class BlockReaderLocal implements BlockReader {
     return total;
   }
 
-  private boolean getCanSkipChecksum() {
-    return (!verifyChecksum) || mlocked.get();
+  private boolean createNoChecksumContext() {
+    if (verifyChecksum) {
+      return replica.addNoChecksumAnchor();
+    } else {
+      return true;
+    }
   }
-  
+
+  private void releaseNoChecksumContext() {
+    if (verifyChecksum) {
+      replica.removeNoChecksumAnchor();
+    }
+  }
+
   @Override
   public synchronized int read(ByteBuffer buf) throws IOException {
-    boolean canSkipChecksum = getCanSkipChecksum();
-    
-    String traceString = null;
-    if (LOG.isTraceEnabled()) {
-      traceString = new StringBuilder().
-          append("read(").
-          append("buf.remaining=").append(buf.remaining()).
-          append(", block=").append(block).
-          append(", filename=").append(filename).
-          append(", canSkipChecksum=").append(canSkipChecksum).
-          append(")").toString();
-      LOG.info(traceString + ": starting");
-    }
-    int nRead;
+    boolean canSkipChecksum = createNoChecksumContext();
     try {
-      if (canSkipChecksum && zeroReadaheadRequested) {
-        nRead = readWithoutBounceBuffer(buf);
-      } else {
-        nRead = readWithBounceBuffer(buf, canSkipChecksum);
-      }
-    } catch (IOException e) {
+      String traceString = null;
       if (LOG.isTraceEnabled()) {
-        LOG.info(traceString + ": I/O error", e);
+        traceString = new StringBuilder().
+            append("read(").
+            append("buf.remaining=").append(buf.remaining()).
+            append(", block=").append(block).
+            append(", filename=").append(filename).
+            append(", canSkipChecksum=").append(canSkipChecksum).
+            append(")").toString();
+        LOG.info(traceString + ": starting");
       }
-      throw e;
+      int nRead;
+      try {
+        if (canSkipChecksum && zeroReadaheadRequested) {
+          nRead = readWithoutBounceBuffer(buf);
+        } else {
+          nRead = readWithBounceBuffer(buf, canSkipChecksum);
+        }
+      } catch (IOException e) {
+        if (LOG.isTraceEnabled()) {
+          LOG.info(traceString + ": I/O error", e);
+        }
+        throw e;
+      }
+      if (LOG.isTraceEnabled()) {
+        LOG.info(traceString + ": returning " + nRead);
+      }
+      return nRead;
+    } finally {
+      if (canSkipChecksum) releaseNoChecksumContext();
     }
-    if (LOG.isTraceEnabled()) {
-      LOG.info(traceString + ": returning " + nRead);
-    }
-    return nRead;
   }
 
   private synchronized int readWithoutBounceBuffer(ByteBuffer buf)
@@ -517,7 +477,7 @@ class BlockReaderLocal implements BlockReader {
       total += bb;
       if (buf.remaining() == 0) return total;
     }
-    boolean eof = false;
+    boolean eof = true, done = false;
     do {
       if (buf.isDirect() && (buf.remaining() >= maxReadaheadLength)
             && ((dataPos % bytesPerChecksum) == 0)) {
@@ -532,54 +492,62 @@ class BlockReaderLocal implements BlockReader {
           buf.limit(oldLimit);
         }
         if (nRead < maxReadaheadLength) {
-          eof = true;
+          done = true;
+        }
+        if (nRead > 0) {
+          eof = false;
         }
         total += nRead;
       } else {
         // Slow lane: refill bounce buffer.
         if (fillDataBuf(canSkipChecksum)) {
-          eof = true;
+          done = true;
         }
         bb = drainDataBuf(buf); // drain bounce buffer if possible
         if (bb >= 0) {
+          eof = false;
           total += bb;
         }
       }
-    } while ((!eof) && (buf.remaining() > 0));
+    } while ((!done) && (buf.remaining() > 0));
     return (eof && total == 0) ? -1 : total;
   }
 
   @Override
   public synchronized int read(byte[] arr, int off, int len)
         throws IOException {
-    boolean canSkipChecksum = getCanSkipChecksum();
-    String traceString = null;
-    if (LOG.isTraceEnabled()) {
-      traceString = new StringBuilder().
-          append("read(arr.length=").append(arr.length).
-          append(", off=").append(off).
-          append(", len=").append(len).
-          append(", filename=").append(filename).
-          append(", block=").append(block).
-          append(", canSkipChecksum=").append(canSkipChecksum).
-          append(")").toString();
-      LOG.trace(traceString + ": starting");
-    }
+    boolean canSkipChecksum = createNoChecksumContext();
     int nRead;
     try {
-      if (canSkipChecksum && zeroReadaheadRequested) {
-        nRead = readWithoutBounceBuffer(arr, off, len);
-      } else {
-        nRead = readWithBounceBuffer(arr, off, len, canSkipChecksum);
-      }
-    } catch (IOException e) {
+      String traceString = null;
       if (LOG.isTraceEnabled()) {
-        LOG.trace(traceString + ": I/O error", e);
+        traceString = new StringBuilder().
+            append("read(arr.length=").append(arr.length).
+            append(", off=").append(off).
+            append(", len=").append(len).
+            append(", filename=").append(filename).
+            append(", block=").append(block).
+            append(", canSkipChecksum=").append(canSkipChecksum).
+            append(")").toString();
+        LOG.trace(traceString + ": starting");
       }
-      throw e;
-    }
-    if (LOG.isTraceEnabled()) {
-      LOG.trace(traceString + ": returning " + nRead);
+      try {
+        if (canSkipChecksum && zeroReadaheadRequested) {
+          nRead = readWithoutBounceBuffer(arr, off, len);
+        } else {
+          nRead = readWithBounceBuffer(arr, off, len, canSkipChecksum);
+        }
+      } catch (IOException e) {
+        if (LOG.isTraceEnabled()) {
+          LOG.trace(traceString + ": I/O error", e);
+        }
+        throw e;
+      }
+      if (LOG.isTraceEnabled()) {
+        LOG.trace(traceString + ": returning " + nRead);
+      }
+    } finally {
+      if (canSkipChecksum) releaseNoChecksumContext();
     }
     return nRead;
   }
@@ -642,20 +610,7 @@ class BlockReaderLocal implements BlockReader {
     if (LOG.isTraceEnabled()) {
       LOG.trace("close(filename=" + filename + ", block=" + block + ")");
     }
-    if (clientMmap != null) {
-      clientMmap.unref();
-      clientMmap = null;
-    }
-    if (fisCache != null) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("putting FileInputStream for " + filename +
-            " back into FileInputStreamCache");
-      }
-      fisCache.put(datanodeID, block, streams);
-    } else {
-      LOG.debug("closing FileInputStream for " + filename);
-      IOUtils.cleanup(LOG, dataIn, checksumIn);
-    }
+    replica.unref();
     freeDataBufIfExists();
     freeChecksumBufIfExists();
   }
@@ -682,49 +637,45 @@ class BlockReaderLocal implements BlockReader {
     return true;
   }
 
+  /**
+   * Get or create a memory map for this replica.
+   * 
+   * There are two kinds of ClientMmap objects we could fetch here: one that 
+   * will always read pre-checksummed data, and one that may read data that
+   * hasn't been checksummed.
+   *
+   * If we fetch the former, "safe" kind of ClientMmap, we have to increment
+   * the anchor count on the shared memory slot.  This will tell the DataNode
+   * not to munlock the block until this ClientMmap is closed.
+   * If we fetch the latter, we don't bother with anchoring.
+   *
+   * @param opts     The options to use, such as SKIP_CHECKSUMS.
+   * 
+   * @return         null on failure; the ClientMmap otherwise.
+   */
   @Override
-  public synchronized ClientMmap getClientMmap(EnumSet<ReadOption> opts,
-        ClientMmapManager mmapManager) {
-    if ((!opts.contains(ReadOption.SKIP_CHECKSUMS)) &&
-          verifyChecksum && (!mlocked.get())) {
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("can't get an mmap for " + block + " of " + filename + 
-            " since SKIP_CHECKSUMS was not given, " +
-            "we aren't skipping checksums, and the block is not mlocked.");
-      }
-      return null;
-    }
-    if (clientMmap == null) {
-      if (mmapDisabled) {
-        return null;
-      }
-      try {
-        clientMmap = mmapManager.fetch(datanodeID, block, streams[0]);
-        if (clientMmap == null) {
-          mmapDisabled = true;
-          return null;
+  public ClientMmap getClientMmap(EnumSet<ReadOption> opts) {
+    boolean anchor = verifyChecksum &&
+        (opts.contains(ReadOption.SKIP_CHECKSUMS) == false);
+    if (anchor) {
+      if (!createNoChecksumContext()) {
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("can't get an mmap for " + block + " of " + filename + 
+              " since SKIP_CHECKSUMS was not given, " +
+              "we aren't skipping checksums, and the block is not mlocked.");
         }
-      } catch (InterruptedException e) {
-        LOG.error("Interrupted while setting up mmap for " + filename, e);
-        Thread.currentThread().interrupt();
         return null;
-      } catch (IOException e) {
-        LOG.error("unable to set up mmap for " + filename, e);
-        mmapDisabled = true;
-        return null;
+      }
+    }
+    ClientMmap clientMmap = null;
+    try {
+      clientMmap = replica.getOrCreateClientMmap(anchor);
+    } finally {
+      if ((clientMmap == null) && anchor) {
+        releaseNoChecksumContext();
       }
     }
     return clientMmap;
-  }
-
-  /**
-   * Set the mlocked state of the BlockReader.
-   * This method does NOT need to be synchronized because mlocked is atomic.
-   *
-   * @param mlocked  the new mlocked state of the BlockReader.
-   */
-  public void setMlocked(boolean mlocked) {
-    this.mlocked.set(mlocked);
   }
   
   @VisibleForTesting
@@ -735,5 +686,23 @@ class BlockReaderLocal implements BlockReader {
   @VisibleForTesting
   int getMaxReadaheadLength() {
     return this.maxReadaheadLength;
+  }
+  
+  /**
+   * Make the replica anchorable.  Normally this can only be done by the
+   * DataNode.  This method is only for testing.
+   */
+  @VisibleForTesting
+  void forceAnchorable() {
+    replica.getSlot().makeAnchorable();
+  }
+
+  /**
+   * Make the replica unanchorable.  Normally this can only be done by the
+   * DataNode.  This method is only for testing.
+   */
+  @VisibleForTesting
+  void forceUnanchorable() {
+    replica.getSlot().makeUnanchorable();
   }
 }

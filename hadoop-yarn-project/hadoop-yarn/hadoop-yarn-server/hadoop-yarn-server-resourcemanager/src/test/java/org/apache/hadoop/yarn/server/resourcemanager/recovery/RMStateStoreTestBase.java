@@ -33,7 +33,7 @@ import java.util.Map;
 
 import javax.crypto.SecretKey;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -244,6 +244,9 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
     Thread.sleep(1000);
     store.close();
 
+    // give tester a chance to modify app state in the store
+    modifyAppState();
+
     // load state
     store = stateStoreHelper.getRMStateStore();
     store.setRMDispatcher(dispatcher);
@@ -307,6 +310,30 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
           "myTrackingUrl", "attemptDiagnostics",
           FinalApplicationStatus.SUCCEEDED);
     store.updateApplicationAttemptState(newAttemptState);
+
+    // test updating the state of an app/attempt whose initial state was not
+    // saved.
+    ApplicationId dummyAppId = ApplicationId.newInstance(1234, 10);
+    ApplicationSubmissionContext dummyContext =
+        new ApplicationSubmissionContextPBImpl();
+    dummyContext.setApplicationId(dummyAppId);
+    ApplicationState dummyApp =
+        new ApplicationState(appState.submitTime, appState.startTime,
+          dummyContext, appState.user, RMAppState.FINISHED, "appDiagnostics",
+          1234);
+    store.updateApplicationState(dummyApp);
+
+    ApplicationAttemptId dummyAttemptId =
+        ApplicationAttemptId.newInstance(dummyAppId, 6);
+    ApplicationAttemptState dummyAttempt =
+        new ApplicationAttemptState(dummyAttemptId,
+          oldAttemptState.getMasterContainer(),
+          oldAttemptState.getAppAttemptCredentials(),
+          oldAttemptState.getStartTime(), RMAppAttemptState.FINISHED,
+          "myTrackingUrl", "attemptDiagnostics",
+          FinalApplicationStatus.SUCCEEDED);
+    store.updateApplicationAttemptState(dummyAttempt);
+
     // let things settle down
     Thread.sleep(1000);
     store.close();
@@ -317,6 +344,7 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
     RMState newRMState = store.loadState();
     Map<ApplicationId, ApplicationState> newRMAppState =
         newRMState.getApplicationState();
+    assertNotNull(newRMAppState.get(dummyApp.getAppId()));
     ApplicationState updatedAppState = newRMAppState.get(appId1);
     assertEquals(appState.getAppId(),updatedAppState.getAppId());
     assertEquals(appState.getSubmitTime(), updatedAppState.getSubmitTime());
@@ -328,6 +356,8 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
     assertEquals(1234, updatedAppState.getFinishTime());
 
     // check updated attempt state
+    assertNotNull(newRMAppState.get(dummyApp.getAppId()).getAttempt(
+      dummyAttemptId));
     ApplicationAttemptState updatedAttemptState =
         updatedAppState.getAttempt(newAttemptState.getAttemptId());
     assertEquals(oldAttemptState.getAttemptId(),
@@ -363,6 +393,7 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
     int sequenceNumber = 1111;
     store.storeRMDelegationTokenAndSequenceNumber(dtId1, renewDate1,
       sequenceNumber);
+    modifyRMDelegationTokenState();
     Map<RMDelegationTokenIdentifier, Long> token1 =
         new HashMap<RMDelegationTokenIdentifier, Long>();
     token1.put(dtId1, renewDate1);
@@ -379,6 +410,20 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
     Assert.assertEquals(keySet, secretManagerState.getMasterKeyState());
     Assert.assertEquals(sequenceNumber,
         secretManagerState.getDTSequenceNumber());
+
+    // update RM delegation token;
+    renewDate1 = new Long(System.currentTimeMillis());
+    ++sequenceNumber;
+    store.updateRMDelegationTokenAndSequenceNumber(
+        dtId1, renewDate1, sequenceNumber);
+    token1.put(dtId1, renewDate1);
+
+    RMDTSecretManagerState updateSecretManagerState =
+        store.loadState().getRMDTSecretManagerState();
+    Assert.assertEquals(token1, updateSecretManagerState.getTokenState());
+    Assert.assertEquals(keySet, updateSecretManagerState.getMasterKeyState());
+    Assert.assertEquals(sequenceNumber,
+        updateSecretManagerState.getDTSequenceNumber());
 
     // check to delete delegationKey
     store.removeRMDTMasterKey(key);
@@ -487,4 +532,13 @@ public class RMStateStoreTestBase extends ClientBaseWithFixes{
       }
     }
   }
+
+  protected void modifyAppState() throws Exception {
+
+  }
+
+  protected void modifyRMDelegationTokenState() throws Exception {
+
+  }
+
 }

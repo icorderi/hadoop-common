@@ -27,6 +27,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.TreeMap;
@@ -43,7 +44,9 @@ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Logger;
 import org.junit.Test;
@@ -62,11 +65,12 @@ public class TestDFSUpgradeFromImage {
   
   private static final Log LOG = LogFactory
       .getLog(TestDFSUpgradeFromImage.class);
-  private static File TEST_ROOT_DIR =
+  private static final File TEST_ROOT_DIR =
                       new File(MiniDFSCluster.getBaseDirectory());
   private static final String HADOOP_DFS_DIR_TXT = "hadoop-dfs-dir.txt";
   private static final String HADOOP22_IMAGE = "hadoop-22-dfs-dir.tgz";
   private static final String HADOOP1_BBW_IMAGE = "hadoop1-bbw.tgz";
+  private static final String HADOOP2_RESERVED_IMAGE = "hadoop-2-reserved.tgz";
 
   private static class ReferenceFileInfo {
     String path;
@@ -83,7 +87,7 @@ public class TestDFSUpgradeFromImage {
     }
   }
   
-  LinkedList<ReferenceFileInfo> refList = new LinkedList<ReferenceFileInfo>();
+  final LinkedList<ReferenceFileInfo> refList = new LinkedList<ReferenceFileInfo>();
   Iterator<ReferenceFileInfo> refIter;
   
   boolean printChecksum = false;
@@ -320,6 +324,96 @@ public class TestDFSUpgradeFromImage {
       assertEquals("Upgrade did not fail with bad MD5", 1, md5failures);
     }
   }
+
+  /**
+   * Test upgrade from 2.0 image with a variety of .snapshot and .reserved
+   * paths to test renaming on upgrade
+   */
+  @Test
+  public void testUpgradeFromRel2ReservedImage() throws Exception {
+    unpackStorage(HADOOP2_RESERVED_IMAGE);
+    MiniDFSCluster cluster = null;
+    // Try it once without setting the upgrade flag to ensure it fails
+    final Configuration conf = new Configuration();
+    try {
+      cluster =
+          new MiniDFSCluster.Builder(conf)
+              .format(false)
+              .startupOption(StartupOption.UPGRADE)
+              .numDataNodes(0).build();
+    } catch (IllegalArgumentException e) {
+      GenericTestUtils.assertExceptionContains(
+          "reserved path component in this version",
+          e);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+    // Try it again with a custom rename string
+    try {
+      FSImageFormat.setRenameReservedPairs(
+          ".snapshot=.user-snapshot," +
+          ".reserved=.my-reserved");
+      cluster =
+          new MiniDFSCluster.Builder(conf)
+              .format(false)
+              .startupOption(StartupOption.UPGRADE)
+              .numDataNodes(0).build();
+      DistributedFileSystem dfs = cluster.getFileSystem();
+      // Make sure the paths were renamed as expected
+      // Also check that paths are present after a restart, checks that the
+      // upgraded fsimage has the same state.
+      final String[] expected = new String[] {
+          "/edits",
+          "/edits/.reserved",
+          "/edits/.user-snapshot",
+          "/edits/.user-snapshot/editsdir",
+          "/edits/.user-snapshot/editsdir/editscontents",
+          "/edits/.user-snapshot/editsdir/editsdir2",
+          "/image",
+          "/image/.reserved",
+          "/image/.user-snapshot",
+          "/image/.user-snapshot/imagedir",
+          "/image/.user-snapshot/imagedir/imagecontents",
+          "/image/.user-snapshot/imagedir/imagedir2",
+          "/.my-reserved",
+          "/.my-reserved/edits-touch",
+          "/.my-reserved/image-touch"
+      };
+      for (int i=0; i<2; i++) {
+        // Restart the second time through this loop
+        if (i==1) {
+          cluster.finalizeCluster(conf);
+          cluster.restartNameNode(true);
+        }
+        ArrayList<Path> toList = new ArrayList<Path>();
+        toList.add(new Path("/"));
+        ArrayList<String> found = new ArrayList<String>();
+        while (!toList.isEmpty()) {
+          Path p = toList.remove(0);
+          FileStatus[] statuses = dfs.listStatus(p);
+          for (FileStatus status: statuses) {
+            final String path = status.getPath().toUri().getPath();
+            System.out.println("Found path " + path);
+            found.add(path);
+            if (status.isDirectory()) {
+              toList.add(status.getPath());
+            }
+          }
+        }
+        for (String s: expected) {
+          assertTrue("Did not find expected path " + s, found.contains(s));
+        }
+        assertEquals("Found an unexpected path while listing filesystem",
+            found.size(), expected.length);
+      }
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
     
   static void recoverAllLeases(DFSClient dfs, 
       Path path) throws IOException {
@@ -349,7 +443,7 @@ public class TestDFSUpgradeFromImage {
         .clusterId("testClusterId");
       cluster = bld.build();
       cluster.waitActive();
-      DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+      DistributedFileSystem dfs = cluster.getFileSystem();
       DFSClient dfsClient = dfs.dfs;
       //Safemode will be off only after upgrade is complete. Wait for it.
       while ( dfsClient.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_GET) ) {

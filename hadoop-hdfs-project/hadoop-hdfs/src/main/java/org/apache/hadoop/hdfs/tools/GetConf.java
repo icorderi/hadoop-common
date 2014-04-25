@@ -76,7 +76,7 @@ public class GetConf extends Configured implements Tool {
     NNRPCADDRESSES("-nnRpcAddresses", "gets the namenode rpc addresses"),
     CONFKEY("-confKey [key]", "gets a specific key from the configuration");
 
-    private static Map<String, CommandHandler> map;
+    private static final Map<String, CommandHandler> map;
     static  {
       map = new HashMap<String, CommandHandler>();
       map.put(NAMENODE.getName().toLowerCase(), 
@@ -167,8 +167,7 @@ public class GetConf extends Configured implements Tool {
     }
 
     
-    /** Method to be overridden by sub classes for specific behavior 
-     * @param args */
+    /** Method to be overridden by sub classes for specific behavior */
     int doWorkInternal(GetConf tool, String[] args) throws Exception {
 
       String value = tool.getConf().getTrimmed(key);

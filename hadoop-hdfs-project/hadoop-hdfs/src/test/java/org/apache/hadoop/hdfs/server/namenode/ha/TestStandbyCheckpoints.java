@@ -18,13 +18,18 @@
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.net.URI;
+import java.net.URL;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -33,6 +38,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
@@ -40,6 +46,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.JournalSet;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.hdfs.util.Canceler;
@@ -55,6 +62,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
@@ -191,9 +199,9 @@ public class TestStandbyCheckpoints {
     Thread.sleep(2000);
     
     // We should make exactly one checkpoint at this new txid. 
-    Mockito.verify(spyImage1, Mockito.times(1))
-      .saveNamespace((FSNamesystem) Mockito.anyObject(),
-          (Canceler)Mockito.anyObject());       
+    Mockito.verify(spyImage1, Mockito.times(1)).saveNamespace(
+        (FSNamesystem) Mockito.anyObject(), Mockito.eq(NameNodeFile.IMAGE),
+        (Canceler) Mockito.anyObject());
   }
   
   /**
@@ -266,6 +274,29 @@ public class TestStandbyCheckpoints {
     HATestUtil.waitForCheckpoint(cluster, 1, ImmutableList.of(104));
     cluster.transitionToStandby(0);
     cluster.transitionToActive(1);
+
+    // Wait to make sure background TransferFsImageUpload thread was cancelled.
+    // This needs to be done before the next test in the suite starts, so that a
+    // file descriptor is not held open during the next cluster init.
+    cluster.shutdown();
+    cluster = null;
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+        ThreadInfo[] threads = threadBean.getThreadInfo(
+          threadBean.getAllThreadIds(), 1);
+        for (ThreadInfo thread: threads) {
+          if (thread.getThreadName().startsWith("TransferFsImageUpload")) {
+            return false;
+          }
+        }
+        return true;
+      }
+    }, 1000, 30000);
+
+    // Assert that former active did not accept the canceled checkpoint file.
+    assertEquals(0, nn0.getFSImage().getMostRecentCheckpointTxId());
   }
   
   /**
@@ -281,13 +312,12 @@ public class TestStandbyCheckpoints {
     DelayAnswer answerer = new DelayAnswer(LOG);
     Mockito.doAnswer(answerer).when(spyImage1)
         .saveNamespace(Mockito.any(FSNamesystem.class),
-            Mockito.any(Canceler.class));
-    
+            Mockito.eq(NameNodeFile.IMAGE), Mockito.any(Canceler.class));
+
     // Perform some edits and wait for a checkpoint to start on the SBN.
     doEdits(0, 1000);
     nn0.getRpcServer().rollEditLog();
     answerer.waitForCall();
-    answerer.proceed();
     assertTrue("SBN is not performing checkpoint but it should be.",
         answerer.getFireCount() == 1 && answerer.getResultCount() == 0);
     
@@ -306,9 +336,71 @@ public class TestStandbyCheckpoints {
     // RPC to the SBN happened during the checkpoint.
     assertTrue("SBN should have still been checkpointing.",
         answerer.getFireCount() == 1 && answerer.getResultCount() == 0);
+    answerer.proceed();
     answerer.waitForResult();
     assertTrue("SBN should have finished checkpointing.",
         answerer.getFireCount() == 1 && answerer.getResultCount() == 1);
+  }
+  
+  @Test(timeout=300000)
+  public void testReadsAllowedDuringCheckpoint() throws Exception {
+    
+    // Set it up so that we know when the SBN checkpoint starts and ends.
+    FSImage spyImage1 = NameNodeAdapter.spyOnFsImage(nn1);
+    DelayAnswer answerer = new DelayAnswer(LOG);
+    Mockito.doAnswer(answerer).when(spyImage1)
+        .saveNamespace(Mockito.any(FSNamesystem.class),
+            Mockito.any(NameNodeFile.class),
+            Mockito.any(Canceler.class));
+    
+    // Perform some edits and wait for a checkpoint to start on the SBN.
+    doEdits(0, 1000);
+    nn0.getRpcServer().rollEditLog();
+    answerer.waitForCall();
+    assertTrue("SBN is not performing checkpoint but it should be.",
+        answerer.getFireCount() == 1 && answerer.getResultCount() == 0);
+    
+    // Make sure that the lock has actually been taken by the checkpointing
+    // thread.
+    ThreadUtil.sleepAtLeastIgnoreInterrupts(1000);
+    
+    // Perform an RPC that needs to take the write lock.
+    Thread t = new Thread() {
+      @Override
+      public void run() {
+        try {
+          nn1.getRpcServer().restoreFailedStorage("false");
+        } catch (IOException e) {
+          e.printStackTrace();
+        }
+      }
+    };
+    t.start();
+    
+    // Make sure that our thread is waiting for the lock.
+    ThreadUtil.sleepAtLeastIgnoreInterrupts(1000);
+    
+    assertFalse(nn1.getNamesystem().getFsLockForTests().hasQueuedThreads());
+    assertFalse(nn1.getNamesystem().getFsLockForTests().isWriteLocked());
+    assertTrue(nn1.getNamesystem().getLongReadLockForTests().hasQueuedThreads());
+    
+    // Get /jmx of the standby NN web UI, which will cause the FSNS read lock to
+    // be taken.
+    String pageContents = DFSTestUtil.urlGet(new URL("http://" +
+        nn1.getHttpAddress().getHostName() + ":" +
+        nn1.getHttpAddress().getPort() + "/jmx"));
+    assertTrue(pageContents.contains("NumLiveDataNodes"));
+    
+    // Make sure that the checkpoint is still going on, implying that the client
+    // RPC to the SBN happened during the checkpoint.
+    assertTrue("SBN should have still been checkpointing.",
+        answerer.getFireCount() == 1 && answerer.getResultCount() == 0);
+    answerer.proceed();
+    answerer.waitForResult();
+    assertTrue("SBN should have finished checkpointing.",
+        answerer.getFireCount() == 1 && answerer.getResultCount() == 1);
+    
+    t.join();
   }
 
   private void doEdits(int start, int stop) throws IOException {

@@ -130,7 +130,7 @@
   <property>
     <description>Are acls enabled.</description>
     <name>yarn.acl.enable</name>
-    <value>true</value>
+    <value>false</value>
   </property>
 
   <property>
@@ -395,7 +395,9 @@
       the Active mode when prompted to.
       (2) The nodes in the RM ensemble are listed in
       yarn.resourcemanager.ha.rm-ids
-      (3) The id of each RM comes from yarn.resourcemanager.ha.id
+      (3) The id of each RM either comes from yarn.resourcemanager.ha.id
+      if yarn.resourcemanager.ha.id is explicitly specified or can be
+      figured out by matching yarn.resourcemanager.address.{id} with local address
       (4) The actual physical addresses come from the configs of the pattern
       - {rpc-config}.{id}</description>
     <name>yarn.resourcemanager.ha.enabled</name>
@@ -403,17 +405,20 @@
   </property>
 
   <property>
-    <description>Enable automatic failover.</description>
+    <description>Enable automatic failover.
+      By default, it is enabled only when HA is enabled</description>
     <name>yarn.resourcemanager.ha.automatic-failover.enabled</name>
-    <value>false</value>
+    <value>true</value>
   </property>
 
   <property>
-    <description>Enable embedded automatic failover. The embedded elector
-      relies on the RM state store to handle fencing, and is primarily intended
-      to be used in conjunction with ZKRMStateStore.</description>
+    <description>Enable embedded automatic failover.
+      By default, it is enabled only when HA is enabled.
+      The embedded elector relies on the RM state store to handle fencing,
+      and is primarily intended to be used in conjunction with ZKRMStateStore.
+    </description>
     <name>yarn.resourcemanager.ha.automatic-failover.embedded</name>
-    <value>false</value>
+    <value>true</value>
   </property>
 
   <property>
@@ -442,7 +447,10 @@
 
   <property>
     <description>The id (string) of the current RM. When HA is enabled, this
-      is a required config. See description of yarn.resourcemanager.ha.enabled
+      is an optional config. The id of current RM can be set by explicitly
+      specifying yarn.resourcemanager.ha.id or figured out by matching
+      yarn.resourcemanager.address.{id} with local address
+      See description of yarn.resourcemanager.ha.enabled
       for full details on how this is used.</description>
     <name>yarn.resourcemanager.ha.id</name>
     <!--value>rm1</value-->
@@ -565,27 +573,21 @@
   </property>
 
   <property>
-    <description>Indicate to ResourceManager as well as clients whether
-    history-service is enabled or not. If enabled, ResourceManager starts
-    recording historical data that ApplicationHistory service can consume.
-    Similarly, clients can redirect to the history service when applications
-    finish if this is enabled.</description>
-    <name>yarn.ahs.enabled</name>
-    <value>false</value>
-  </property>
-
-  <property>
     <description>Number of worker threads that write the history data.</description>
     <name>yarn.resourcemanager.history-writer.multi-threaded-dispatcher.pool-size</name>
     <value>10</value>
   </property>
 
   <property>
-    <description>The implementation class of ApplicationHistoryStore, which is
-    to be used by RMApplicationHistoryWriter.
-    </description>
-    <name>yarn.resourcemanager.history-writer.class</name>
-    <value>org.apache.hadoop.yarn.server.applicationhistoryservice.NullApplicationHistoryStore</value>
+    <description>The class to use as the configuration provider.
+    If org.apache.hadoop.yarn.LocalConfigurationProvider is used,
+    the local configuration will be loaded.
+    If org.apache.hadoop.yarn.FileSystemBasedConfigurationProvider is used,
+    the configuration which will be loaded should be uploaded to remote File system first.
+    </description>>
+    <name>yarn.resourcemanager.configuration.provider-class</name>
+    <value>org.apache.hadoop.yarn.LocalConfigurationProvider</value>
+    <!-- <value>org.apache.hadoop.yarn.FileSystemBasedConfigurationProvider</value> -->
   </property>
 
   <!-- Node Manager Configs -->
@@ -869,6 +871,24 @@
   </property>
 
   <property>
+    <description>The maximum percentage of disk space utilization allowed after 
+    which a disk is marked as bad. Values can range from 0.0 to 100.0. 
+    If the value is greater than or equal to 100, the nodemanager will check 
+    for full disk. This applies to yarn-nodemanager.local-dirs and 
+    yarn.nodemanager.log-dirs.</description>
+    <name>yarn.nodemanager.disk-health-checker.max-disk-utilization-per-disk-percentage</name>
+    <value>100.0</value>
+  </property>
+
+  <property>
+    <description>The minimum space that must be available on a disk for
+    it to be used. This applies to yarn-nodemanager.local-dirs and 
+    yarn.nodemanager.log-dirs.</description>
+    <name>yarn.nodemanager.disk-health-checker.min-free-space-per-disk-mb</name>
+    <value>0</value>
+  </property>
+
+  <property>
     <description>The path to the Linux container executor.</description>
     <name>yarn.nodemanager.linux-container-executor.path</name>
   </property>
@@ -999,6 +1019,19 @@
   	<value>500</value>
   </property>
   
+  <property>
+    <description>Enable the node manager to recover after starting</description>
+    <name>yarn.nodemanager.recovery.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <description>The local filesystem directory in which the node manager will
+    store state when recovery is enabled.</description>
+    <name>yarn.nodemanager.recovery.dir</name>
+    <value>${hadoop.tmp.dir}/yarn-nm-recovery</value>
+  </property>
+
   <!--Map Reduce configuration-->
   <property>
     <name>yarn.nodemanager.aux-services.mapreduce_shuffle.class</name>
@@ -1065,58 +1098,124 @@
     <value></value>
   </property>
 
-  <!-- Application History Service's Configuration-->
+  <!-- Timeline Service's Configuration-->
 
   <property>
-    <description>The hostname of the AHS.</description>
-    <name>yarn.ahs.hostname</name>
+    <description>Indicate to clients whether timeline service is enabled or not.
+    If enabled, clients will put entities and events to the timeline server.
+    </description>
+    <name>yarn.timeline-service.enabled</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <description>The hostname of the timeline service web application.</description>
+    <name>yarn.timeline-service.hostname</name>
     <value>0.0.0.0</value>
   </property>
 
   <property>
-    <description>The http address of the AHS web application.</description>
-    <name>yarn.ahs.webapp.address</name>
-    <value>${yarn.ahs.hostname}:8188</value>
+    <description>This is default address for the timeline server to start the
+    RPC server.</description>
+    <name>yarn.timeline-service.address</name>
+    <value>${yarn.timeline-service.hostname}:10200</value>
   </property>
 
   <property>
-    <description>The https adddress of the AHS web application.</description>
-    <name>yarn.ahs.webapp.https.address</name>
-    <value>${yarn.ahs.hostname}:8190</value>
+    <description>The http address of the timeline service web application.</description>
+    <name>yarn.timeline-service.webapp.address</name>
+    <value>${yarn.timeline-service.hostname}:8188</value>
+  </property>
+
+  <property>
+    <description>The https address of the timeline service web application.</description>
+    <name>yarn.timeline-service.webapp.https.address</name>
+    <value>${yarn.timeline-service.hostname}:8190</value>
+  </property>
+
+  <property>
+    <description>Store class name for timeline store.</description>
+    <name>yarn.timeline-service.store-class</name>
+    <value>org.apache.hadoop.yarn.server.applicationhistoryservice.timeline.LeveldbTimelineStore</value>
+  </property>
+
+  <property>
+    <description>Enable age off of timeline store data.</description>
+    <name>yarn.timeline-service.ttl-enable</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <description>Time to live for timeline store data in milliseconds.</description>
+    <name>yarn.timeline-service.ttl-ms</name>
+    <value>604800000</value>
+  </property>
+
+  <property>
+    <description>Store file name for leveldb timeline store.</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.path</name>
+    <value>${yarn.log.dir}/timeline</value>
+  </property>
+
+  <property>
+    <description>Length of time to wait between deletion cycles of leveldb timeline store in milliseconds.</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.ttl-interval-ms</name>
+    <value>300000</value>
+  </property>
+
+  <property>
+    <description>Size of read cache for uncompressed blocks for leveldb timeline store in bytes.</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.read-cache-size</name>
+    <value>104857600</value>
+  </property>
+
+  <property>
+    <description>Size of cache for recently read entity start times for leveldb timeline store in number of entities.</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.start-time-read-cache-size</name>
+    <value>10000</value>
+  </property>
+
+  <property>
+    <description>Size of cache for recently written entity start times for leveldb timeline store in number of entities.</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.start-time-write-cache-size</name>
+    <value>10000</value>
+  </property>
+
+  <property>
+    <description>Handler thread count to serve the client RPC requests.</description>
+    <name>yarn.timeline-service.handler-thread-count</name>
+    <value>10</value>
+  </property>
+
+  <property>
+    <description>Indicate to ResourceManager as well as clients whether
+    history-service is enabled or not. If enabled, ResourceManager starts
+    recording historical data that ApplicationHistory service can consume.
+    Similarly, clients can redirect to the history service when applications
+    finish if this is enabled.</description>
+    <name>yarn.timeline-service.generic-application-history.enabled</name>
+    <value>false</value>
   </property>
 
   <property>
     <description>URI pointing to the location of the FileSystem path where
     the history will be persisted. This must be supplied when using
     org.apache.hadoop.yarn.server.applicationhistoryservice.FileSystemApplicationHistoryStore
-    as the value for yarn.resourcemanager.history-writer.store.class</description>
-    <name>yarn.ahs.fs-history-store.uri</name>
-    <value>${hadoop.log.dir}/yarn/system/ahstore</value>
+    as the value for yarn.timeline-service.generic-application-history.store-class</description>
+    <name>yarn.timeline-service.generic-application-history.fs-history-store.uri</name>
+    <value>${hadoop.log.dir}/yarn/system/history</value>
   </property>
 
-  <property>
-    <description>This is default address for the Application History server
-    to start the RPC server.</description>
-    <name>yarn.ahs.address</name>
-    <value>0.0.0.0:10200</value>
-  </property>
-
-  <property>
-    <description>CLient thread count to serve the client requests.</description>
-    <name>yarn.ahs.client.thread-count</name>
-    <value>10</value>
-  </property>
-  
   <property>
     <description>T-file compression types used to compress history data.</description>
-    <name>yarn.ahs.fs-history-store.compression-type</name>
+    <name>yarn.timeline-service.generic-application-history.fs-history-store.compression-type</name>
     <value>none</value>
   </property>
   
   <property>
-	<description> Store class name for history store, defaulting to file
-		system store </description>
-	<name>yarn.ahs.store.class</name>
+	<description>Store class name for history store, defaulting to file
+	system store </description>
+	<name>yarn.timeline-service.generic-application-history.store-class</name>
 	<value>org.apache.hadoop.yarn.server.applicationhistoryservice.FileSystemApplicationHistoryStore</value>
   </property>
 
@@ -1127,5 +1226,18 @@
     </description>
     <name>yarn.client.application-client-protocol.poll-interval-ms</name>
     <value>200</value>
+  </property>
+
+  <property>
+    <description>RSS usage of a process computed via 
+    /proc/pid/stat is not very accurate as it includes shared pages of a
+    process. /proc/pid/smaps provides useful information like
+    Private_Dirty, Private_Clean, Shared_Dirty, Shared_Clean which can be used
+    for computing more accurate RSS. When this flag is enabled, RSS is computed
+    as Min(Shared_Dirty, Pss) + Private_Clean + Private_Dirty. It excludes
+    read-only shared mappings in RSS computation.  
+    </description>
+    <name>yarn.nodemanager.container-monitor.procfs-tree.smaps-based-rss.enabled</name>
+    <value>false</value>
   </property>
 </configuration>

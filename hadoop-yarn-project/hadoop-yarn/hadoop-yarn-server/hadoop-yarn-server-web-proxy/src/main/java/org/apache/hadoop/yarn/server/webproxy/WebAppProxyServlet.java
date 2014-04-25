@@ -50,6 +50,7 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.StringHelper;
@@ -69,6 +70,7 @@ public class WebAppProxyServlet extends HttpServlet {
 
   private final List<TrackingUriPlugin> trackingUriPlugins;
   private final String rmAppPageUrlBase;
+  private final transient YarnConfiguration conf;
 
   private static class _ implements Hamlet._ {
     //Empty
@@ -90,7 +92,7 @@ public class WebAppProxyServlet extends HttpServlet {
   public WebAppProxyServlet()
   {
     super();
-    YarnConfiguration conf = new YarnConfiguration();
+    conf = new YarnConfiguration();
     this.trackingUriPlugins =
         conf.getInstances(YarnConfiguration.YARN_TRACKING_URL_GENERATOR,
             TrackingUriPlugin.class);
@@ -273,7 +275,12 @@ public class WebAppProxyServlet extends HttpServlet {
       
       boolean checkUser = securityEnabled && (!userWasWarned || !userApproved);
 
-      ApplicationReport applicationReport = getApplicationReport(id);
+      ApplicationReport applicationReport = null;
+      try {
+        applicationReport = getApplicationReport(id);
+      } catch (ApplicationNotFoundException e) {
+        applicationReport = null;
+      }
       if(applicationReport == null) {
         LOG.warn(req.getRemoteUser()+" Attempting to access "+id+
             " that was not found");
@@ -300,7 +307,8 @@ public class WebAppProxyServlet extends HttpServlet {
         return;
       } else {
         if (ProxyUriUtils.getSchemeFromUrl(original).isEmpty()) {
-          trackingUri = ProxyUriUtils.getUriFromAMUrl("http", original);
+          trackingUri = ProxyUriUtils.getUriFromAMUrl(
+              WebAppUtils.getHttpSchemePrefix(conf), original);
         } else {
           trackingUri = new URI(original);
         }

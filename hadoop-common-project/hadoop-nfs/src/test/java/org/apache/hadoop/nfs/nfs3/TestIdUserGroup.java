@@ -17,11 +17,11 @@
  */
 package org.apache.hadoop.nfs.nfs3;
 
-import static org.junit.Assert.fail;
-
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 
-import org.apache.hadoop.nfs.nfs3.IdUserGroup.DuplicateNameOrIdException;
+import org.apache.hadoop.conf.Configuration;
 import org.junit.Test;
 
 import com.google.common.collect.BiMap;
@@ -33,24 +33,52 @@ public class TestIdUserGroup {
   public void testDuplicates() throws IOException {
     String GET_ALL_USERS_CMD = "echo \"root:x:0:0:root:/root:/bin/bash\n"
         + "hdfs:x:11501:10787:Grid Distributed File System:/home/hdfs:/bin/bash\n"
-        + "hdfs:x:11502:10788:Grid Distributed File System:/home/hdfs:/bin/bash\""
+        + "hdfs:x:11502:10788:Grid Distributed File System:/home/hdfs:/bin/bash\n"
+        + "hdfs1:x:11501:10787:Grid Distributed File System:/home/hdfs:/bin/bash\n"
+        + "hdfs2:x:11502:10787:Grid Distributed File System:/home/hdfs:/bin/bash\n"
+        + "bin:x:2:2:bin:/bin:/bin/sh\n"
+        + "bin:x:1:1:bin:/bin:/sbin/nologin\n"
+        + "daemon:x:1:1:daemon:/usr/sbin:/bin/sh\n"
+        + "daemon:x:2:2:daemon:/sbin:/sbin/nologin\""
         + " | cut -d: -f1,3";
     String GET_ALL_GROUPS_CMD = "echo \"hdfs:*:11501:hrt_hdfs\n"
-        + "mapred:x:497\n" + "mapred2:x:497\"" + " | cut -d: -f1,3";
+        + "mapred:x:497\n"
+        + "mapred2:x:497\n"
+        + "mapred:x:498\n" 
+        + "mapred3:x:498\"" 
+        + " | cut -d: -f1,3";
     // Maps for id to name map
     BiMap<Integer, String> uMap = HashBiMap.create();
     BiMap<Integer, String> gMap = HashBiMap.create();
 
-    try {
-      IdUserGroup.updateMapInternal(uMap, "user", GET_ALL_USERS_CMD, ":");
-      fail("didn't detect the duplicate name");
-    } catch (DuplicateNameOrIdException e) {
-    }
-    
-    try {
-      IdUserGroup.updateMapInternal(gMap, "group", GET_ALL_GROUPS_CMD, ":");
-      fail("didn't detect the duplicate id");
-    } catch (DuplicateNameOrIdException e) {
-    }
+    IdUserGroup.updateMapInternal(uMap, "user", GET_ALL_USERS_CMD, ":");
+    assertTrue(uMap.size() == 5);
+    assertEquals("root", uMap.get(0));
+    assertEquals("hdfs", uMap.get(11501));
+    assertEquals("hdfs2",uMap.get(11502));
+    assertEquals("bin", uMap.get(2));
+    assertEquals("daemon", uMap.get(1));
+
+    IdUserGroup.updateMapInternal(gMap, "group", GET_ALL_GROUPS_CMD, ":");
+    assertTrue(gMap.size() == 3);
+    assertEquals("hdfs",gMap.get(11501));
+    assertEquals("mapred", gMap.get(497));
+    assertEquals("mapred3", gMap.get(498));
+  }
+
+  @Test
+  public void testUserUpdateSetting() throws IOException {
+    IdUserGroup iug = new IdUserGroup();
+    assertEquals(iug.getTimeout(), IdUserGroup.TIMEOUT_DEFAULT);
+
+    Configuration conf = new Configuration();
+    conf.setLong(IdUserGroup.NFS_USERUPDATE_MILLY, 0);
+    iug = new IdUserGroup(conf);
+    assertEquals(iug.getTimeout(), IdUserGroup.TIMEOUT_MIN);
+
+    conf.setLong(IdUserGroup.NFS_USERUPDATE_MILLY,
+        IdUserGroup.TIMEOUT_DEFAULT * 2);
+    iug = new IdUserGroup(conf);
+    assertEquals(iug.getTimeout(), IdUserGroup.TIMEOUT_DEFAULT * 2);
   }
 }

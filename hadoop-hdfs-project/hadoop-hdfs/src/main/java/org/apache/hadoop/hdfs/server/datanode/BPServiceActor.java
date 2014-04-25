@@ -33,8 +33,8 @@ import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
@@ -74,7 +74,7 @@ class BPServiceActor implements Runnable {
   final InetSocketAddress nnAddr;
   HAServiceState state;
 
-  BPOfferService bpos;
+  final BPOfferService bpos;
   
   // lastBlockReport, lastDeletedReport and lastHeartbeat may be assigned/read
   // by testing threads (through BPServiceActor#triggerXXX), while also 
@@ -98,10 +98,13 @@ class BPServiceActor implements Runnable {
    * keyed by block ID, contains the pending changes which have yet to be
    * reported to the NN. Access should be synchronized on this object.
    */
-  private final Map<String, PerStoragePendingIncrementalBR>
+  private final Map<DatanodeStorage, PerStoragePendingIncrementalBR>
       pendingIncrementalBRperStorage = Maps.newHashMap();
 
-  private volatile int pendingReceivedRequests = 0;
+  // IBR = Incremental Block Report. If this flag is set then an IBR will be
+  // sent immediately by the actor thread without waiting for the IBR timer
+  // to elapse.
+  private volatile boolean sendImmediateIBR = false;
   private volatile boolean shouldServiceRun = true;
   private final DataNode dn;
   private final DNConf dnConf;
@@ -201,14 +204,6 @@ class BPServiceActor implements Runnable {
           "DataNode version '" + dnVersion + "' but is within acceptable " +
           "limits. Note: This is normal during a rolling upgrade.");
     }
-
-    if (HdfsConstants.LAYOUT_VERSION != nsInfo.getLayoutVersion()) {
-      LOG.warn("DataNode and NameNode layout versions must be the same." +
-        " Expected: "+ HdfsConstants.LAYOUT_VERSION +
-        " actual "+ nsInfo.getLayoutVersion());
-      throw new IncorrectVersionException(
-          nsInfo.getLayoutVersion(), "namenode");
-    }
   }
 
   private void connectToNNAndHandshake() throws IOException {
@@ -275,20 +270,18 @@ class BPServiceActor implements Runnable {
     ArrayList<StorageReceivedDeletedBlocks> reports =
         new ArrayList<StorageReceivedDeletedBlocks>(pendingIncrementalBRperStorage.size());
     synchronized (pendingIncrementalBRperStorage) {
-      for (Map.Entry<String, PerStoragePendingIncrementalBR> entry :
+      for (Map.Entry<DatanodeStorage, PerStoragePendingIncrementalBR> entry :
            pendingIncrementalBRperStorage.entrySet()) {
-        final String storageUuid = entry.getKey();
+        final DatanodeStorage storage = entry.getKey();
         final PerStoragePendingIncrementalBR perStorageMap = entry.getValue();
 
         if (perStorageMap.getBlockInfoCount() > 0) {
           // Send newly-received and deleted blockids to namenode
           ReceivedDeletedBlockInfo[] rdbi = perStorageMap.dequeueBlockInfos();
-          pendingReceivedRequests =
-              (pendingReceivedRequests > rdbi.length ?
-                  (pendingReceivedRequests - rdbi.length) : 0);
-          reports.add(new StorageReceivedDeletedBlocks(storageUuid, rdbi));
+          reports.add(new StorageReceivedDeletedBlocks(storage, rdbi));
         }
       }
+      sendImmediateIBR = false;
     }
 
     if (reports.size() == 0) {
@@ -311,9 +304,9 @@ class BPServiceActor implements Runnable {
             // blocks back onto our queue, but only in the case where we
             // didn't put something newer in the meantime.
             PerStoragePendingIncrementalBR perStorageMap =
-                pendingIncrementalBRperStorage.get(report.getStorageID());
-            pendingReceivedRequests +=
-                perStorageMap.putMissingBlockInfos(report.getBlocks());
+                pendingIncrementalBRperStorage.get(report.getStorage());
+            perStorageMap.putMissingBlockInfos(report.getBlocks());
+            sendImmediateIBR = true;
           }
         }
       }
@@ -321,21 +314,19 @@ class BPServiceActor implements Runnable {
   }
 
   /**
-   * Retrieve the incremental BR state for a given storage UUID
-   * @param storageUuid
-   * @return
+   * @return pending incremental block report for given {@code storage}
    */
   private PerStoragePendingIncrementalBR getIncrementalBRMapForStorage(
-      String storageUuid) {
+      DatanodeStorage storage) {
     PerStoragePendingIncrementalBR mapForStorage =
-        pendingIncrementalBRperStorage.get(storageUuid);
+        pendingIncrementalBRperStorage.get(storage);
 
     if (mapForStorage == null) {
       // This is the first time we are adding incremental BR state for
       // this storage so create a new map. This is required once per
       // storage, per service actor.
       mapForStorage = new PerStoragePendingIncrementalBR();
-      pendingIncrementalBRperStorage.put(storageUuid, mapForStorage);
+      pendingIncrementalBRperStorage.put(storage, mapForStorage);
     }
 
     return mapForStorage;
@@ -346,20 +337,18 @@ class BPServiceActor implements Runnable {
    * exists for the same block it is removed.
    *
    * Caller must synchronize access using pendingIncrementalBRperStorage.
-   * @param bInfo
-   * @param storageUuid
    */
   void addPendingReplicationBlockInfo(ReceivedDeletedBlockInfo bInfo,
-      String storageUuid) {
+      DatanodeStorage storage) {
     // Make sure another entry for the same block is first removed.
     // There may only be one such entry.
-    for (Map.Entry<String, PerStoragePendingIncrementalBR> entry :
+    for (Map.Entry<DatanodeStorage, PerStoragePendingIncrementalBR> entry :
           pendingIncrementalBRperStorage.entrySet()) {
       if (entry.getValue().removeBlockInfo(bInfo)) {
         break;
       }
     }
-    getIncrementalBRMapForStorage(storageUuid).putBlockInfo(bInfo);
+    getIncrementalBRMapForStorage(storage).putBlockInfo(bInfo);
   }
 
   /*
@@ -370,8 +359,9 @@ class BPServiceActor implements Runnable {
   void notifyNamenodeBlockImmediately(
       ReceivedDeletedBlockInfo bInfo, String storageUuid) {
     synchronized (pendingIncrementalBRperStorage) {
-      addPendingReplicationBlockInfo(bInfo, storageUuid);
-      pendingReceivedRequests++;
+      addPendingReplicationBlockInfo(
+          bInfo, dn.getFSDataset().getStorage(storageUuid));
+      sendImmediateIBR = true;
       pendingIncrementalBRperStorage.notifyAll();
     }
   }
@@ -379,7 +369,8 @@ class BPServiceActor implements Runnable {
   void notifyNamenodeDeletedBlock(
       ReceivedDeletedBlockInfo bInfo, String storageUuid) {
     synchronized (pendingIncrementalBRperStorage) {
-      addPendingReplicationBlockInfo(bInfo, storageUuid);
+      addPendingReplicationBlockInfo(
+          bInfo, dn.getFSDataset().getStorage(storageUuid));
     }
   }
 
@@ -431,6 +422,11 @@ class BPServiceActor implements Runnable {
         }
       }
     }
+  }
+
+  @VisibleForTesting
+  boolean hasPendingIBR() {
+    return sendImmediateIBR;
   }
 
   /**
@@ -619,6 +615,20 @@ class BPServiceActor implements Runnable {
     bpos.shutdownActor(this);
   }
 
+  private void handleRollingUpgradeStatus(HeartbeatResponse resp) {
+    RollingUpgradeStatus rollingUpgradeStatus = resp.getRollingUpdateStatus();
+    if (rollingUpgradeStatus != null &&
+        rollingUpgradeStatus.getBlockPoolId().compareTo(bpos.getBlockPoolId()) != 0) {
+      // Can this ever occur?
+      LOG.error("Invalid BlockPoolId " +
+          rollingUpgradeStatus.getBlockPoolId() +
+          " in HeartbeatResponse. Expected " +
+          bpos.getBlockPoolId());
+    } else {
+      bpos.signalRollingUpgrade(rollingUpgradeStatus != null);
+    }
+  }
+
   /**
    * Main loop for each BP thread. Run until shutdown,
    * forever calling remote NameNode functions.
@@ -665,6 +675,10 @@ class BPServiceActor implements Runnable {
                 this, resp.getNameNodeHaState());
             state = resp.getNameNodeHaState().getState();
 
+            if (state == HAServiceState.ACTIVE) {
+              handleRollingUpgradeStatus(resp);
+            }
+
             long startProcessCommands = now();
             if (!processCommand(resp.getCommands()))
               continue;
@@ -676,8 +690,8 @@ class BPServiceActor implements Runnable {
             }
           }
         }
-        if (pendingReceivedRequests > 0
-            || (startTime - lastDeletedReport > dnConf.deleteReportInterval)) {
+        if (sendImmediateIBR ||
+            (startTime - lastDeletedReport > dnConf.deleteReportInterval)) {
           reportReceivedDeletedBlocks();
           lastDeletedReport = startTime;
         }
@@ -701,7 +715,7 @@ class BPServiceActor implements Runnable {
         long waitTime = dnConf.heartBeatInterval - 
         (Time.now() - lastHeartbeat);
         synchronized(pendingIncrementalBRperStorage) {
-          if (waitTime > 0 && pendingReceivedRequests == 0) {
+          if (waitTime > 0 && !sendImmediateIBR) {
             try {
               pendingIncrementalBRperStorage.wait(waitTime);
             } catch (InterruptedException ie) {
@@ -875,7 +889,7 @@ class BPServiceActor implements Runnable {
   }
 
   private static class PerStoragePendingIncrementalBR {
-    private Map<Long, ReceivedDeletedBlockInfo> pendingIncrementalBR =
+    private final Map<Long, ReceivedDeletedBlockInfo> pendingIncrementalBR =
         Maps.newHashMap();
 
     /**

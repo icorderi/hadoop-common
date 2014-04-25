@@ -19,12 +19,12 @@
 package org.apache.hadoop.mapreduce.v2.hs;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.v2.hs.HistoryServerStateStoreService.HistoryServerState;
@@ -121,7 +121,6 @@ public class JobHistoryServer extends CompositeService {
 
     // This is required for WebApps to use https if enabled.
     MRWebAppUtil.initialize(getConfig());
-    HttpConfig.setPolicy(MRWebAppUtil.getJHSHttpPolicy());
     try {
       doSecureLogin(conf);
     } catch(IOException ie) {
@@ -171,8 +170,21 @@ public class JobHistoryServer extends CompositeService {
   }
 
   protected void doSecureLogin(Configuration conf) throws IOException {
+    InetSocketAddress socAddr = getBindAddress(conf);
     SecurityUtil.login(conf, JHAdminConfig.MR_HISTORY_KEYTAB,
-        JHAdminConfig.MR_HISTORY_PRINCIPAL);
+        JHAdminConfig.MR_HISTORY_PRINCIPAL, socAddr.getHostName());
+  }
+
+  /**
+   * Retrieve JHS bind address from configuration
+   *
+   * @param conf
+   * @return InetSocketAddress
+   */
+  public static InetSocketAddress getBindAddress(Configuration conf) {
+    return conf.getSocketAddr(JHAdminConfig.MR_HISTORY_ADDRESS,
+      JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS,
+      JHAdminConfig.DEFAULT_MR_HISTORY_PORT);
   }
 
   @Override

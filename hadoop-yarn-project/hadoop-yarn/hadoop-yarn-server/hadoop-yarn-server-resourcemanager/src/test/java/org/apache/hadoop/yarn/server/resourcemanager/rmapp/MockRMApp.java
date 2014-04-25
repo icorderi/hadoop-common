@@ -21,6 +21,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.rmapp;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.hadoop.yarn.MockApps;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -218,7 +219,12 @@ public class MockRMApp implements RMApp {
   }
 
   @Override
-  public boolean isAppSafeToTerminate() {
+  public Set<String> getApplicationTags() {
+    return null;
+  }
+
+  @Override
+  public boolean isAppFinalStateStored() {
     return true;
   }
 

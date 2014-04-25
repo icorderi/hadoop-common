@@ -34,6 +34,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
@@ -102,13 +103,13 @@ public class FileJournalManager implements JournalManager {
   }
 
   @Override
-  synchronized public EditLogOutputStream startLogSegment(long txid) 
-      throws IOException {
+  synchronized public EditLogOutputStream startLogSegment(long txid,
+      int layoutVersion) throws IOException {
     try {
       currentInProgress = NNStorage.getInProgressEditsFile(sd, txid);
       EditLogOutputStream stm = new EditLogFileOutputStream(conf,
           currentInProgress, outputBufferCapacity);
-      stm.create();
+      stm.create(layoutVersion);
       return stm;
     } catch (IOException e) {
       LOG.warn("Unable to start log segment " + txid +
@@ -167,7 +168,7 @@ public class FileJournalManager implements JournalManager {
 
   /**
    * Find all editlog segments starting at or above the given txid.
-   * @param fromTxId the txnid which to start looking
+   * @param firstTxId the txnid which to start looking
    * @param inProgressOk whether or not to include the in-progress edit log 
    *        segment       
    * @return a list of remote edit logs
@@ -197,6 +198,32 @@ public class FileJournalManager implements JournalManager {
     
     return ret;
   }
+  
+  /**
+   * Discard all editlog segments whose first txid is greater than or equal to
+   * the given txid, by renaming them with suffix ".trash".
+   */
+  private void discardEditLogSegments(long startTxId) throws IOException {
+    File currentDir = sd.getCurrentDir();
+    List<EditLogFile> allLogFiles = matchEditLogs(currentDir);
+    List<EditLogFile> toTrash = Lists.newArrayList();
+    LOG.info("Discard the EditLog files, the given start txid is " + startTxId);
+    // go through the editlog files to make sure the startTxId is right at the
+    // segment boundary
+    for (EditLogFile elf : allLogFiles) {
+      if (elf.getFirstTxId() >= startTxId) {
+        toTrash.add(elf);
+      } else {
+        Preconditions.checkState(elf.getLastTxId() < startTxId);
+      }
+    }
+
+    for (EditLogFile elf : toTrash) {
+      // rename these editlog file as .trash
+      elf.moveAsideTrashFile(startTxId);
+      LOG.info("Trash the EditLog file " + elf);
+    }
+  }
 
   /**
    * returns matching edit logs via the log directory. Simple helper function
@@ -220,8 +247,8 @@ public class FileJournalManager implements JournalManager {
       Matcher editsMatch = EDITS_REGEX.matcher(name);
       if (editsMatch.matches()) {
         try {
-          long startTxId = Long.valueOf(editsMatch.group(1));
-          long endTxId = Long.valueOf(editsMatch.group(2));
+          long startTxId = Long.parseLong(editsMatch.group(1));
+          long endTxId = Long.parseLong(editsMatch.group(2));
           ret.add(new EditLogFile(f, startTxId, endTxId));
         } catch (NumberFormatException nfe) {
           LOG.error("Edits file " + f + " has improperly formatted " +
@@ -234,7 +261,7 @@ public class FileJournalManager implements JournalManager {
       Matcher inProgressEditsMatch = EDITS_INPROGRESS_REGEX.matcher(name);
       if (inProgressEditsMatch.matches()) {
         try {
-          long startTxId = Long.valueOf(inProgressEditsMatch.group(1));
+          long startTxId = Long.parseLong(inProgressEditsMatch.group(1));
           ret.add(
               new EditLogFile(f, startTxId, HdfsConstants.INVALID_TXID, true));
         } catch (NumberFormatException nfe) {
@@ -449,6 +476,12 @@ public class FileJournalManager implements JournalManager {
       this.hasCorruptHeader = val.hasCorruptHeader();
     }
 
+    public void scanLog() throws IOException {
+      EditLogValidation val = EditLogFileInputStream.scanEditLog(file);
+      this.lastTxId = val.getEndTxId();
+      this.hasCorruptHeader = val.hasCorruptHeader();
+    }
+
     public boolean isInProgress() {
       return isInProgress;
     }
@@ -466,6 +499,11 @@ public class FileJournalManager implements JournalManager {
       renameSelf(".corrupt");
     }
 
+    void moveAsideTrashFile(long markerTxid) throws IOException {
+      assert this.getFirstTxId() >= markerTxid;
+      renameSelf(".trash");
+    }
+
     public void moveAsideEmptyFile() throws IOException {
       assert lastTxId == HdfsConstants.INVALID_TXID;
       renameSelf(".empty");
@@ -474,10 +512,12 @@ public class FileJournalManager implements JournalManager {
     private void renameSelf(String newSuffix) throws IOException {
       File src = file;
       File dst = new File(src.getParent(), src.getName() + newSuffix);
-      boolean success = src.renameTo(dst);
-      if (!success) {
-        throw new IOException(
-          "Couldn't rename log " + src + " to " + dst);
+      // renameTo fails on Windows if the destination file already exists.
+      if (!src.renameTo(dst)) {
+        if (!dst.delete() || !src.renameTo(dst)) {
+          throw new IOException(
+            "Couldn't rename log " + src + " to " + dst);
+        }
       }
       file = dst;
     }
@@ -530,8 +570,13 @@ public class FileJournalManager implements JournalManager {
   }
 
   @Override
+  public void discardSegments(long startTxid) throws IOException {
+    discardEditLogSegments(startTxid);
+  }
+
+  @Override
   public long getJournalCTime() throws IOException {
-    StorageInfo sInfo = new StorageInfo();
+    StorageInfo sInfo = new StorageInfo((NodeType)null);
     sInfo.readProperties(sd);
     return sInfo.getCTime();
   }

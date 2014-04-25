@@ -31,7 +31,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutFlags;
 import org.apache.hadoop.io.IOUtils;
 
@@ -43,14 +42,14 @@ import com.google.common.annotations.VisibleForTesting;
  */
 @InterfaceAudience.Private
 public class EditLogFileOutputStream extends EditLogOutputStream {
-  private static Log LOG = LogFactory.getLog(EditLogFileOutputStream.class);
+  private static final Log LOG = LogFactory.getLog(EditLogFileOutputStream.class);
   public static final int MIN_PREALLOCATION_LENGTH = 1024 * 1024;
 
   private File file;
   private FileOutputStream fp; // file stream for storing edit logs
   private FileChannel fc; // channel of the file stream for sync
   private EditsDoubleBuffer doubleBuf;
-  static ByteBuffer fill = ByteBuffer.allocateDirect(MIN_PREALLOCATION_LENGTH);
+  static final ByteBuffer fill = ByteBuffer.allocateDirect(MIN_PREALLOCATION_LENGTH);
   private boolean shouldSyncWritesAndSkipFsync = false;
 
   private static boolean shouldSkipFsyncForTests = false;
@@ -115,10 +114,10 @@ public class EditLogFileOutputStream extends EditLogOutputStream {
    * Create empty edits logs file.
    */
   @Override
-  public void create() throws IOException {
+  public void create(int layoutVersion) throws IOException {
     fc.truncate(0);
     fc.position(0);
-    writeHeader(doubleBuf.getCurrentBuf());
+    writeHeader(layoutVersion, doubleBuf.getCurrentBuf());
     setReadyToFlush();
     flush();
   }
@@ -127,12 +126,14 @@ public class EditLogFileOutputStream extends EditLogOutputStream {
    * Write header information for this EditLogFileOutputStream to the provided
    * DataOutputSream.
    * 
+   * @param layoutVersion the LayoutVersion of the EditLog
    * @param out the output stream to write the header to.
    * @throws IOException in the event of error writing to the stream.
    */
   @VisibleForTesting
-  public static void writeHeader(DataOutputStream out) throws IOException {
-    out.writeInt(HdfsConstants.LAYOUT_VERSION);
+  public static void writeHeader(int layoutVersion, DataOutputStream out)
+      throws IOException {
+    out.writeInt(layoutVersion);
     LayoutFlags.write(out);
   }
 

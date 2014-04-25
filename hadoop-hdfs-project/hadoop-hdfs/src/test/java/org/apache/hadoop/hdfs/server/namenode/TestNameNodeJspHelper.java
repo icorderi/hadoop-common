@@ -272,7 +272,7 @@ public class TestNameNodeJspHelper {
     LIVE("[Live Datanodes(| +):(| +)]\\d"), 
     DEAD("[Dead Datanodes(| +):(| +)]\\d");
 
-    private Pattern pattern;
+    private final Pattern pattern;
 
     public Pattern getPattern() {
       return pattern;
@@ -316,7 +316,7 @@ public class TestNameNodeJspHelper {
       String digitLine = output.substring(matcher.start(), matcher.end())
           .trim();
       assertTrue("assertCounts error. actual != expected",
-          Integer.valueOf(digitLine) == expectedCount);
+          Integer.parseInt(digitLine) == expectedCount);
     } else {
       fail("assertCount matcher error");
     }

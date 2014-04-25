@@ -34,6 +34,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReceivedAndDeletedRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportResponseProto;
@@ -102,9 +103,10 @@ public class DatanodeProtocolClientSideTranslatorPB implements
   private static DatanodeProtocolPB createNamenode(
       InetSocketAddress nameNodeAddr, Configuration conf,
       UserGroupInformation ugi) throws IOException {
-    return RPC.getProxy(DatanodeProtocolPB.class,
+    return RPC.getProtocolProxy(DatanodeProtocolPB.class,
         RPC.getProtocolVersion(DatanodeProtocolPB.class), nameNodeAddr, ugi,
-        conf, NetUtils.getSocketFactory(conf, DatanodeProtocolPB.class));
+        conf, NetUtils.getSocketFactory(conf, DatanodeProtocolPB.class),
+        org.apache.hadoop.ipc.Client.getPingInterval(conf), null).getProxy();
   }
 
   /** Create a {@link NameNode} proxy */
@@ -183,7 +185,12 @@ public class DatanodeProtocolClientSideTranslatorPB implements
       cmds[index] = PBHelper.convert(p);
       index++;
     }
-    return new HeartbeatResponse(cmds, PBHelper.convert(resp.getHaStatus()));
+    RollingUpgradeStatus rollingUpdateStatus = null;
+    if (resp.hasRollingUpgradeStatus()) {
+      rollingUpdateStatus = PBHelper.convert(resp.getRollingUpgradeStatus());
+    }
+    return new HeartbeatResponse(cmds, PBHelper.convert(resp.getHaStatus()),
+        rollingUpdateStatus);
   }
 
   @Override
@@ -245,7 +252,8 @@ public class DatanodeProtocolClientSideTranslatorPB implements
     for (StorageReceivedDeletedBlocks storageBlock : receivedAndDeletedBlocks) {
       StorageReceivedDeletedBlocksProto.Builder repBuilder = 
           StorageReceivedDeletedBlocksProto.newBuilder();
-      repBuilder.setStorageUuid(storageBlock.getStorageID());
+      repBuilder.setStorageUuid(storageBlock.getStorage().getStorageID());  // Set for wire compatibility.
+      repBuilder.setStorage(PBHelper.convert(storageBlock.getStorage()));
       for (ReceivedDeletedBlockInfo rdBlock : storageBlock.getBlocks()) {
         repBuilder.addBlocks(PBHelper.convert(rdBlock));
       }

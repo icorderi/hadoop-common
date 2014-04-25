@@ -31,7 +31,7 @@ import java.security.PrivilegedExceptionAction;
 
 import javax.security.sasl.SaslException;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
@@ -168,7 +168,7 @@ public class TestClientToAMTokens {
       protected ClientRMService createClientRMService() {
         return new ClientRMService(this.rmContext, scheduler,
           this.rmAppManager, this.applicationACLsManager, this.queueACLsManager,
-          getRMDTSecretManager());
+          getRMContext().getRMDelegationTokenSecretManager());
       };
 
       @Override

@@ -92,6 +92,10 @@ public class RMContainerAllocator extends RMContainerRequestor
   private static final Priority PRIORITY_REDUCE;
   private static final Priority PRIORITY_MAP;
 
+  @VisibleForTesting
+  public static final String RAMPDOWN_DIAGNOSTIC = "Reducer preempted "
+      + "to make room for pending map attempts";
+
   private Thread eventHandlingThread;
   private final AtomicBoolean stopped;
 
@@ -151,7 +155,8 @@ public class RMContainerAllocator extends RMContainerRequestor
 
   private final AMPreemptionPolicy preemptionPolicy;
 
-  BlockingQueue<ContainerAllocatorEvent> eventQueue
+  @VisibleForTesting
+  protected BlockingQueue<ContainerAllocatorEvent> eventQueue
     = new LinkedBlockingQueue<ContainerAllocatorEvent>();
 
   private ScheduleStats scheduleStats = new ScheduleStats();
@@ -1143,9 +1148,9 @@ public class RMContainerAllocator extends RMContainerRequestor
           new Comparator<TaskAttemptId>() {
         @Override
         public int compare(TaskAttemptId o1, TaskAttemptId o2) {
-          float p = getJob().getTask(o1.getTaskId()).getAttempt(o1).getProgress() -
-              getJob().getTask(o2.getTaskId()).getAttempt(o2).getProgress();
-          return p >= 0 ? 1 : -1;
+          return Float.compare(
+              getJob().getTask(o1.getTaskId()).getAttempt(o1).getProgress(),
+              getJob().getTask(o2.getTaskId()).getAttempt(o2).getProgress());
         }
       });
       
@@ -1153,7 +1158,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         TaskAttemptId id = reduceList.remove(0);//remove the one on top
         LOG.info("Preempting " + id);
         preemptionWaitingReduces.add(id);
-        eventHandler.handle(new TaskAttemptEvent(id, TaskAttemptEventType.TA_KILL));
+        eventHandler.handle(new TaskAttemptKillEvent(id, RAMPDOWN_DIAGNOSTIC));
       }
     }
     

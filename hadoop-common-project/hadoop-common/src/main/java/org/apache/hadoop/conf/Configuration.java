@@ -666,9 +666,9 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
      }
 
      this.updatingResource = new HashMap<String, String[]>(other.updatingResource);
+     this.finalParameters = new HashSet<String>(other.finalParameters);
    }
    
-    this.finalParameters = new HashSet<String>(other.finalParameters);
     synchronized(Configuration.class) {
       REGISTRY.put(this, null);
     }
@@ -764,6 +764,19 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   public void addResource(InputStream in, String name) {
     addResourceObject(new Resource(in, name));
   }
+  
+  /**
+   * Add a configuration resource.
+   *
+   * The properties of this resource will override properties of previously
+   * added resources, unless they were marked <a href="#Final">final</a>.
+   *
+   * @param conf Configuration object from which to load properties
+   */
+  public void addResource(Configuration conf) {
+    addResourceObject(new Resource(conf.getProps()));
+  }
+
   
   
   /**
@@ -2246,13 +2259,13 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         root = (Element)resource;
       }
 
-      if (doc == null && root == null) {
-        if (quiet)
-          return null;
-        throw new RuntimeException(resource + " not found");
-      }
-
       if (root == null) {
+        if (doc == null) {
+          if (quiet) {
+            return null;
+          }
+          throw new RuntimeException(resource + " not found");
+        }
         root = doc.getDocumentElement();
       }
       Properties toAddTo = properties;

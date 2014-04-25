@@ -120,10 +120,9 @@ enum YarnApplicationAttemptStateProto {
   APP_ATTEMPT_LAUNCHED = 6;
   APP_ATTEMPT_FAILED = 7;
   APP_ATTEMPT_RUNNING = 8;
-  APP_ATTEMPT_FINAL_SAVING = 9;
-  APP_ATTEMPT_FINISHING = 10;
-  APP_ATTEMPT_FINISHED = 11;
-  APP_ATTEMPT_KILLED = 12;
+  APP_ATTEMPT_FINISHING = 9;
+  APP_ATTEMPT_FINISHED = 10;
+  APP_ATTEMPT_KILLED = 11;
 }
 
 enum FinalApplicationStatusProto {
@@ -190,6 +189,7 @@ message ApplicationReportProto {
   optional float progress = 17;
   optional string applicationType = 18;
   optional hadoop.common.TokenProto am_rm_token = 19;
+  repeated string applicationTags = 20;
 }
 
 message ApplicationAttemptReportProto {
@@ -287,6 +287,7 @@ message ApplicationSubmissionContextProto {
   optional ResourceProto resource = 9;
   optional string applicationType = 10 [default = "YARN"];
   optional bool keep_containers_across_application_attempts = 11 [default = false];
+  repeated string applicationTags = 12;
 }
 
 enum ApplicationAccessTypeProto {

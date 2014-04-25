@@ -19,8 +19,6 @@ package org.apache.hadoop.http;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 
 /**
  * Singleton to get access to Http related configuration.
@@ -28,19 +26,19 @@ import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class HttpConfig {
-  private static Policy policy;
   public enum Policy {
     HTTP_ONLY,
     HTTPS_ONLY,
     HTTP_AND_HTTPS;
 
+    private static final Policy[] VALUES = values();
     public static Policy fromString(String value) {
-      if (HTTPS_ONLY.name().equalsIgnoreCase(value)) {
-        return HTTPS_ONLY;
-      } else if (HTTP_AND_HTTPS.name().equalsIgnoreCase(value)) {
-        return HTTP_AND_HTTPS;
+      for (Policy p : VALUES) {
+        if (p.name().equalsIgnoreCase(value)) {
+          return p;
+        }
       }
-      return HTTP_ONLY;
+      return null;
     }
 
     public boolean isHttpEnabled() {
@@ -50,29 +48,5 @@ public class HttpConfig {
     public boolean isHttpsEnabled() {
       return this == HTTPS_ONLY || this == HTTP_AND_HTTPS;
     }
-  }
-
-  static {
-    Configuration conf = new Configuration();
-    boolean sslEnabled = conf.getBoolean(
-            CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_KEY,
-            CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_DEFAULT);
-    policy = sslEnabled ? Policy.HTTPS_ONLY : Policy.HTTP_ONLY;
-  }
-
-  public static void setPolicy(Policy policy) {
-    HttpConfig.policy = policy;
-  }
-
-  public static boolean isSecure() {
-    return policy == Policy.HTTPS_ONLY;
-  }
-
-  public static String getSchemePrefix() {
-    return (isSecure()) ? "https://" : "http://";
-  }
-
-  public static String getScheme(Policy policy) {
-    return policy == Policy.HTTPS_ONLY ? "https://" : "http://";
   }
 }

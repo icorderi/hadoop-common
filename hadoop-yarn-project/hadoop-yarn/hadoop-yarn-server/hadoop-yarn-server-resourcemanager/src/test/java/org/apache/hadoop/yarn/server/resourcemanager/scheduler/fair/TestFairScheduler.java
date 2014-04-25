@@ -22,6 +22,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -41,7 +42,7 @@ import java.util.Set;
 
 import javax.xml.parsers.ParserConfigurationException;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
@@ -56,10 +57,12 @@ import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationSubmissionContextPBImpl;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
@@ -146,7 +149,7 @@ public class TestFairScheduler {
     resourceManager.getRMContext().getStateStore().start();
 
     // to initialize the master key
-    resourceManager.getRMContainerTokenSecretManager().rollMasterKey();
+    resourceManager.getRMContext().getContainerTokenSecretManager().rollMasterKey();
   }
 
   @After
@@ -621,7 +624,7 @@ public class TestFairScheduler {
     ApplicationAttemptId appAttemptId = createAppAttemptId(1, 1);
     RMApp rmApp = new RMAppImpl(appAttemptId.getApplicationId(), rmContext, conf,
         null, null, null, ApplicationSubmissionContext.newInstance(null, null,
-            null, null, null, false, false, 0, null, null), null, null, 0, null);
+        null, null, null, false, false, 0, null, null), null, null, 0, null, null);
     appsMap.put(appAttemptId.getApplicationId(), rmApp);
     
     AppAddedSchedulerEvent appAddedEvent =
@@ -647,7 +650,7 @@ public class TestFairScheduler {
     ApplicationAttemptId appAttemptId = createAppAttemptId(1, 1);
     RMApp rmApp = new RMAppImpl(appAttemptId.getApplicationId(), rmContext, conf,
         null, null, null, ApplicationSubmissionContext.newInstance(null, null,
-            null, null, null, false, false, 0, null, null), null, null, 0, null);
+        null, null, null, false, false, 0, null, null), null, null, 0, null, null);
     appsMap.put(appAttemptId.getApplicationId(), rmApp);
 
     AppAddedSchedulerEvent appAddedEvent =
@@ -700,6 +703,22 @@ public class TestFairScheduler {
     assertEquals("root.asterix", rmApp1.getQueue());
     assertEquals(rmApp2.getQueue(), queue2.getName());
     assertEquals("root.notdefault", rmApp2.getQueue());
+  }
+
+  @Test
+  public void testAssignToNonLeafQueueReturnsNull() throws Exception {
+    conf.set(FairSchedulerConfiguration.USER_AS_DEFAULT_QUEUE, "true");
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    scheduler.getQueueManager().getLeafQueue("root.child1.granchild", true);
+    scheduler.getQueueManager().getLeafQueue("root.child2", true);
+
+    RMApp rmApp1 = new MockRMApp(0, 0, RMAppState.NEW);
+    RMApp rmApp2 = new MockRMApp(1, 1, RMAppState.NEW);
+
+    // Trying to assign to non leaf queue would return null
+    assertNull(scheduler.assignToQueue(rmApp1, "root.child1", "tintin"));
+    assertNotNull(scheduler.assignToQueue(rmApp2, "root.child2", "snowy"));
   }
   
   @Test
@@ -1765,7 +1784,7 @@ public class TestFairScheduler {
     RMApp application =
         new RMAppImpl(applicationId, resourceManager.getRMContext(), conf, name, user, 
           queue, submissionContext, scheduler, masterService,
-          System.currentTimeMillis(), "YARN");
+          System.currentTimeMillis(), "YARN", null);
     resourceManager.getRMContext().getRMApps().putIfAbsent(applicationId, application);
     application.handle(new RMAppEvent(applicationId, RMAppEventType.START));
 
@@ -2546,5 +2565,139 @@ public class TestFairScheduler {
         (FairScheduler) resourceManager.getResourceScheduler();
     TestSchedulerUtils.verifyAppAddedAndRemovedFromScheduler(
       scheduler.getSchedulerApplications(), scheduler, "default");
+  }
+
+  @Test
+  public void testMoveRunnableApp() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+    
+    QueueManager queueMgr = scheduler.getQueueManager();
+    FSLeafQueue oldQueue = queueMgr.getLeafQueue("queue1", true);
+    FSLeafQueue targetQueue = queueMgr.getLeafQueue("queue2", true);
+
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    ApplicationId appId = appAttId.getApplicationId();
+    RMNode node = MockNodes.newNodeInfo(1, Resources.createResource(1024));
+    NodeAddedSchedulerEvent nodeEvent = new NodeAddedSchedulerEvent(node);
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node);
+    scheduler.handle(nodeEvent);
+    scheduler.handle(updateEvent);
+    
+    assertEquals(Resource.newInstance(1024, 1), oldQueue.getResourceUsage());
+    scheduler.update();
+    assertEquals(Resource.newInstance(3072, 3), oldQueue.getDemand());
+    
+    scheduler.moveApplication(appId, "queue2");
+    FSSchedulerApp app = scheduler.getSchedulerApp(appAttId);
+    assertSame(targetQueue, app.getQueue());
+    assertFalse(oldQueue.getRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    assertTrue(targetQueue.getRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    assertEquals(Resource.newInstance(0, 0), oldQueue.getResourceUsage());
+    assertEquals(Resource.newInstance(1024, 1), targetQueue.getResourceUsage());
+    assertEquals(0, oldQueue.getNumRunnableApps());
+    assertEquals(1, targetQueue.getNumRunnableApps());
+    assertEquals(1, queueMgr.getRootQueue().getNumRunnableApps());
+    
+    scheduler.update();
+    assertEquals(Resource.newInstance(0, 0), oldQueue.getDemand());
+    assertEquals(Resource.newInstance(3072, 3), targetQueue.getDemand());
+  }
+  
+  @Test
+  public void testMoveNonRunnableApp() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+    
+    QueueManager queueMgr = scheduler.getQueueManager();
+    FSLeafQueue oldQueue = queueMgr.getLeafQueue("queue1", true);
+    FSLeafQueue targetQueue = queueMgr.getLeafQueue("queue2", true);
+    scheduler.getAllocationConfiguration().queueMaxApps.put("root.queue1", 0);
+    scheduler.getAllocationConfiguration().queueMaxApps.put("root.queue2", 0);
+    
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    
+    assertEquals(0, oldQueue.getNumRunnableApps());
+    scheduler.moveApplication(appAttId.getApplicationId(), "queue2");
+    assertEquals(0, oldQueue.getNumRunnableApps());
+    assertEquals(0, targetQueue.getNumRunnableApps());
+    assertEquals(0, queueMgr.getRootQueue().getNumRunnableApps());
+  }
+  
+  @Test
+  public void testMoveMakesAppRunnable() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+    
+    QueueManager queueMgr = scheduler.getQueueManager();
+    FSLeafQueue oldQueue = queueMgr.getLeafQueue("queue1", true);
+    FSLeafQueue targetQueue = queueMgr.getLeafQueue("queue2", true);
+    scheduler.getAllocationConfiguration().queueMaxApps.put("root.queue1", 0);
+    
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    
+    FSSchedulerApp app = scheduler.getSchedulerApp(appAttId);
+    assertTrue(oldQueue.getNonRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    
+    scheduler.moveApplication(appAttId.getApplicationId(), "queue2");
+    assertFalse(oldQueue.getNonRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    assertFalse(targetQueue.getNonRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    assertTrue(targetQueue.getRunnableAppSchedulables()
+        .contains(app.getAppSchedulable()));
+    assertEquals(1, targetQueue.getNumRunnableApps());
+    assertEquals(1, queueMgr.getRootQueue().getNumRunnableApps());
+  }
+    
+  @Test (expected = YarnException.class)
+  public void testMoveWouldViolateMaxAppsConstraints() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+    
+    QueueManager queueMgr = scheduler.getQueueManager();
+    queueMgr.getLeafQueue("queue2", true);
+    scheduler.getAllocationConfiguration().queueMaxApps.put("root.queue2", 0);
+    
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    
+    scheduler.moveApplication(appAttId.getApplicationId(), "queue2");
+  }
+  
+  @Test (expected = YarnException.class)
+  public void testMoveWouldViolateMaxResourcesConstraints() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+    
+    QueueManager queueMgr = scheduler.getQueueManager();
+    FSLeafQueue oldQueue = queueMgr.getLeafQueue("queue1", true);
+    queueMgr.getLeafQueue("queue2", true);
+    scheduler.getAllocationConfiguration().maxQueueResources.put("root.queue2",
+        Resource.newInstance(1024, 1));
+
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    RMNode node = MockNodes.newNodeInfo(1, Resources.createResource(2048, 2));
+    NodeAddedSchedulerEvent nodeEvent = new NodeAddedSchedulerEvent(node);
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node);
+    scheduler.handle(nodeEvent);
+    scheduler.handle(updateEvent);
+    scheduler.handle(updateEvent);
+    
+    assertEquals(Resource.newInstance(2048, 2), oldQueue.getResourceUsage());
+    scheduler.moveApplication(appAttId.getApplicationId(), "queue2");
+  }
+  
+  @Test (expected = YarnException.class)
+  public void testMoveToNonexistentQueue() throws Exception {
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    scheduler.getQueueManager().getLeafQueue("queue1", true);
+    
+    ApplicationAttemptId appAttId =
+        createSchedulingRequest(1024, 1, "queue1", "user1", 3);
+    scheduler.moveApplication(appAttId.getApplicationId(), "queue2");
   }
 }

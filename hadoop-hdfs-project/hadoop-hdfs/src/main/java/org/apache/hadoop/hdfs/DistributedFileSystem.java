@@ -54,11 +54,14 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.fs.VolumeId;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -66,11 +69,12 @@ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.HdfsLocatedFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.security.token.block.InvalidBlockTokenException;
@@ -118,12 +122,6 @@ public class DistributedFileSystem extends FileSystem {
   @Override
   public String getScheme() {
     return HdfsConstants.HDFS_URI_SCHEME;
-  }
-
-  @Deprecated
-  public DistributedFileSystem(InetSocketAddress namenode,
-    Configuration conf) throws IOException {
-    initialize(NameNode.getUri(namenode), conf);
   }
 
   @Override
@@ -230,9 +228,9 @@ public class DistributedFileSystem extends FileSystem {
    * The returned array of {@link BlockStorageLocation} augments
    * {@link BlockLocation} with a {@link VolumeId} per block replica. The
    * VolumeId specifies the volume on the datanode on which the replica resides.
-   * The VolumeId has to be checked via {@link VolumeId#isValid()} before being
-   * used because volume information can be unavailable if the corresponding
-   * datanode is down or if the requested block is not found.
+   * The VolumeId associated with a replica may be null because volume
+   * information can be unavailable if the corresponding datanode is down or
+   * if the requested block is not found.
    * 
    * This API is unstable, and datanode-side support is disabled by default. It
    * can be enabled by setting "dfs.datanode.hdfs-blocks-metadata.enabled" to
@@ -991,6 +989,14 @@ public class DistributedFileSystem extends FileSystem {
     dfs.finalizeUpgrade();
   }
 
+  /**
+   * Rolling upgrade: start/finalize/query.
+   */
+  public RollingUpgradeInfo rollingUpgrade(RollingUpgradeAction action)
+      throws IOException {
+    return dfs.rollingUpgrade(action);
+  }
+
   /*
    * Requests the namenode to dump data strcutures into specified 
    * file.
@@ -1002,55 +1008,6 @@ public class DistributedFileSystem extends FileSystem {
   @Override
   public FsServerDefaults getServerDefaults() throws IOException {
     return dfs.getServerDefaults();
-  }
-
-  /**
-   * We need to find the blocks that didn't match.  Likely only one 
-   * is corrupt but we will report both to the namenode.  In the future,
-   * we can consider figuring out exactly which block is corrupt.
-   */
-  // We do not see a need for user to report block checksum errors and do not  
-  // want to rely on user to report block corruptions.
-  @Deprecated
-  public boolean reportChecksumFailure(Path f, 
-    FSDataInputStream in, long inPos, 
-    FSDataInputStream sums, long sumsPos) {
-    
-    if(!(in instanceof HdfsDataInputStream && sums instanceof HdfsDataInputStream))
-      throw new IllegalArgumentException(
-          "Input streams must be types of HdfsDataInputStream");
-    
-    LocatedBlock lblocks[] = new LocatedBlock[2];
-
-    // Find block in data stream.
-    HdfsDataInputStream dfsIn = (HdfsDataInputStream) in;
-    ExtendedBlock dataBlock = dfsIn.getCurrentBlock();
-    if (dataBlock == null) {
-      LOG.error("Error: Current block in data stream is null! ");
-      return false;
-    }
-    DatanodeInfo[] dataNode = {dfsIn.getCurrentDatanode()}; 
-    lblocks[0] = new LocatedBlock(dataBlock, dataNode);
-    LOG.info("Found checksum error in data stream at "
-        + dataBlock + " on datanode="
-        + dataNode[0]);
-
-    // Find block in checksum stream
-    HdfsDataInputStream dfsSums = (HdfsDataInputStream) sums;
-    ExtendedBlock sumsBlock = dfsSums.getCurrentBlock();
-    if (sumsBlock == null) {
-      LOG.error("Error: Current block in checksum stream is null! ");
-      return false;
-    }
-    DatanodeInfo[] sumsNode = {dfsSums.getCurrentDatanode()}; 
-    lblocks[1] = new LocatedBlock(sumsBlock, sumsNode);
-    LOG.info("Found checksum error in checksum stream at "
-        + sumsBlock + " on datanode=" + sumsNode[0]);
-
-    // Ask client to delete blocks.
-    dfs.reportChecksumFailure(f.toString(), lblocks);
-
-    return true;
   }
 
   /**
@@ -1270,64 +1227,11 @@ public class DistributedFileSystem extends FileSystem {
   }
 
   @Override
-  public 
-  Token<DelegationTokenIdentifier> getDelegationToken(String renewer
-  ) throws IOException {
+  public Token<DelegationTokenIdentifier> getDelegationToken(String renewer)
+      throws IOException {
     Token<DelegationTokenIdentifier> result =
       dfs.getDelegationToken(renewer == null ? null : new Text(renewer));
     return result;
-  }
-
-  /*
-   * Delegation Token Operations
-   * These are DFS only operations.
-   */
-  
-  /**
-   * Get a valid Delegation Token.
-   * 
-   * @param renewer Name of the designated renewer for the token
-   * @return Token<DelegationTokenIdentifier>
-   * @throws IOException
-   * @deprecated use {@link #getDelegationToken(String)}
-   */
-  @Deprecated
-  public Token<DelegationTokenIdentifier> getDelegationToken(Text renewer)
-      throws IOException {
-    return getDelegationToken(renewer.toString());
-  }
-  
-  /**
-   * Renew an existing delegation token.
-   * 
-   * @param token delegation token obtained earlier
-   * @return the new expiration time
-   * @throws IOException
-   * @deprecated Use Token.renew instead.
-   */
-  public long renewDelegationToken(Token<DelegationTokenIdentifier> token)
-      throws InvalidToken, IOException {
-    try {
-      return token.renew(getConf());
-    } catch (InterruptedException ie) {
-      throw new RuntimeException("Caught interrupted", ie);
-    }
-  }
-
-  /**
-   * Cancel an existing delegation token.
-   * 
-   * @param token delegation token
-   * @throws IOException
-   * @deprecated Use Token.cancel instead.
-   */
-  public void cancelDelegationToken(Token<DelegationTokenIdentifier> token)
-      throws IOException {
-    try {
-      token.cancel(getConf());
-    } catch (InterruptedException ie) {
-      throw new RuntimeException("Caught interrupted", ie);
-    }
   }
 
   /**
@@ -1525,7 +1429,7 @@ public class DistributedFileSystem extends FileSystem {
    * Get the difference between two snapshots, or between a snapshot and the
    * current tree of a directory.
    * 
-   * @see DFSClient#getSnapshotDiffReport(Path, String, String)
+   * @see DFSClient#getSnapshotDiffReport(String, String, String)
    */
   public SnapshotDiffReport getSnapshotDiffReport(final Path snapshotDir,
       final String fromSnapshot, final String toSnapshot) throws IOException {
@@ -1738,5 +1642,131 @@ public class DistributedFileSystem extends FileSystem {
    */
   public RemoteIterator<CachePoolEntry> listCachePools() throws IOException {
     return dfs.listCachePools();
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void modifyAclEntries(Path path, final List<AclEntry> aclSpec)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.modifyAclEntries(getPathName(p), aclSpec);
+        return null;
+      }
+
+      @Override
+      public Void next(final FileSystem fs, final Path p) throws IOException {
+        fs.modifyAclEntries(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void removeAclEntries(Path path, final List<AclEntry> aclSpec)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.removeAclEntries(getPathName(p), aclSpec);
+        return null;
+      }
+
+      @Override
+      public Void next(final FileSystem fs, final Path p) throws IOException {
+        fs.removeAclEntries(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void removeDefaultAcl(Path path) throws IOException {
+    final Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.removeDefaultAcl(getPathName(p));
+        return null;
+      }
+      @Override
+      public Void next(final FileSystem fs, final Path p)
+        throws IOException, UnresolvedLinkException {
+        fs.removeDefaultAcl(p);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void removeAcl(Path path) throws IOException {
+    final Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.removeAcl(getPathName(p));
+        return null;
+      }
+      @Override
+      public Void next(final FileSystem fs, final Path p)
+        throws IOException, UnresolvedLinkException {
+        fs.removeAcl(p);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void setAcl(Path path, final List<AclEntry> aclSpec) throws IOException {
+    Path absF = fixRelativePart(path);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.setAcl(getPathName(p), aclSpec);
+        return null;
+      }
+
+      @Override
+      public Void next(final FileSystem fs, final Path p) throws IOException {
+        fs.setAcl(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    final Path absF = fixRelativePart(path);
+    return new FileSystemLinkResolver<AclStatus>() {
+      @Override
+      public AclStatus doCall(final Path p) throws IOException {
+        return dfs.getAclStatus(getPathName(p));
+      }
+      @Override
+      public AclStatus next(final FileSystem fs, final Path p)
+        throws IOException, UnresolvedLinkException {
+        return fs.getAclStatus(p);
+      }
+    }.resolve(this, absF);
   }
 }

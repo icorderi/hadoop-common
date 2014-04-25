@@ -26,6 +26,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclEntryScope;
+import org.apache.hadoop.fs.permission.AclEntryType;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
@@ -59,6 +64,7 @@ import org.apache.hadoop.hdfs.security.token.block.BlockKey;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
 import org.apache.hadoop.hdfs.server.protocol.*;
@@ -68,6 +74,7 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.proto.SecurityProtos.TokenProto;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
+import org.junit.Assert;
 import org.junit.Test;
 
 import com.google.common.base.Joiner;
@@ -100,15 +107,15 @@ public class TestPBHelper {
         PBHelper.convert(NamenodeRoleProto.NAMENODE));
   }
 
-  private static StorageInfo getStorageInfo() {
-    return new StorageInfo(1, 2, "cid", 3);
+  private static StorageInfo getStorageInfo(NodeType type) {
+    return new StorageInfo(1, 2, "cid", 3, type);
   }
 
   @Test
   public void testConvertStoragInfo() {
-    StorageInfo info = getStorageInfo();
+    StorageInfo info = getStorageInfo(NodeType.NAME_NODE);
     StorageInfoProto infoProto = PBHelper.convert(info);
-    StorageInfo info2 = PBHelper.convert(infoProto);
+    StorageInfo info2 = PBHelper.convert(infoProto, NodeType.NAME_NODE);
     assertEquals(info.getClusterID(), info2.getClusterID());
     assertEquals(info.getCTime(), info2.getCTime());
     assertEquals(info.getLayoutVersion(), info2.getLayoutVersion());
@@ -117,7 +124,7 @@ public class TestPBHelper {
 
   @Test
   public void testConvertNamenodeRegistration() {
-    StorageInfo info = getStorageInfo();
+    StorageInfo info = getStorageInfo(NodeType.NAME_NODE);
     NamenodeRegistration reg = new NamenodeRegistration("address:999",
         "http:1000", info, NamenodeRole.NAMENODE);
     NamenodeRegistrationProto regProto = PBHelper.convert(reg);
@@ -243,8 +250,8 @@ public class TestPBHelper {
 
   @Test
   public void testConvertCheckpointSignature() {
-    CheckpointSignature s = new CheckpointSignature(getStorageInfo(), "bpid",
-        100, 1);
+    CheckpointSignature s = new CheckpointSignature(
+        getStorageInfo(NodeType.NAME_NODE), "bpid", 100, 1);
     CheckpointSignatureProto sProto = PBHelper.convert(s);
     CheckpointSignature s1 = PBHelper.convert(sProto);
     assertEquals(s.getBlockpoolID(), s1.getBlockpoolID());
@@ -515,7 +522,7 @@ public class TestPBHelper {
     ExportedBlockKeys expKeys = new ExportedBlockKeys(true, 9, 10,
         getBlockKey(1), keys);
     DatanodeRegistration reg = new DatanodeRegistration(dnId,
-        new StorageInfo(), expKeys, "3.0.0");
+        new StorageInfo(NodeType.DATA_NODE), expKeys, "3.0.0");
     DatanodeRegistrationProto proto = PBHelper.convert(reg);
     DatanodeRegistration reg2 = PBHelper.convert(proto);
     compare(reg.getStorageInfo(), reg2.getStorageInfo());
@@ -579,5 +586,40 @@ public class TestPBHelper {
         HdfsProtos.ChecksumTypeProto.CHECKSUM_CRC32);
     assertEquals(PBHelper.convert(DataChecksum.Type.CRC32C),
         HdfsProtos.ChecksumTypeProto.CHECKSUM_CRC32C);
+  }
+
+  @Test
+  public void testAclEntryProto() {
+    // All fields populated.
+    AclEntry e1 = new AclEntry.Builder().setName("test")
+        .setPermission(FsAction.READ_EXECUTE).setScope(AclEntryScope.DEFAULT)
+        .setType(AclEntryType.OTHER).build();
+    // No name.
+    AclEntry e2 = new AclEntry.Builder().setScope(AclEntryScope.ACCESS)
+        .setType(AclEntryType.USER).setPermission(FsAction.ALL).build();
+    // No permission, which will default to the 0'th enum element.
+    AclEntry e3 = new AclEntry.Builder().setScope(AclEntryScope.ACCESS)
+        .setType(AclEntryType.USER).setName("test").build();
+    AclEntry[] expected = new AclEntry[] { e1, e2,
+        new AclEntry.Builder()
+            .setScope(e3.getScope())
+            .setType(e3.getType())
+            .setName(e3.getName())
+            .setPermission(FsAction.NONE)
+            .build() };
+    AclEntry[] actual = Lists.newArrayList(
+        PBHelper.convertAclEntry(PBHelper.convertAclEntryProto(Lists
+            .newArrayList(e1, e2, e3)))).toArray(new AclEntry[0]);
+    Assert.assertArrayEquals(expected, actual);
+  }
+
+  @Test
+  public void testAclStatusProto() {
+    AclEntry e = new AclEntry.Builder().setName("test")
+        .setPermission(FsAction.READ_EXECUTE).setScope(AclEntryScope.DEFAULT)
+        .setType(AclEntryType.OTHER).build();
+    AclStatus s = new AclStatus.Builder().owner("foo").group("bar").addEntry(e)
+        .build();
+    Assert.assertEquals(s, PBHelper.convert(PBHelper.convert(s)));
   }
 }

@@ -19,18 +19,29 @@
 package org.apache.hadoop.ipc;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION;
-import static org.apache.hadoop.security.SaslRpcServer.AuthMethod.*;
-import static org.junit.Assert.*;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_RPC_PROTECTION;
+import static org.apache.hadoop.security.SaslRpcServer.AuthMethod.KERBEROS;
+import static org.apache.hadoop.security.SaslRpcServer.AuthMethod.SIMPLE;
+import static org.apache.hadoop.security.SaslRpcServer.AuthMethod.TOKEN;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.lang.annotation.Annotation;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.PrivilegedExceptionAction;
 import java.security.Security;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -58,6 +69,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.KerberosInfo;
 import org.apache.hadoop.security.SaslInputStream;
 import org.apache.hadoop.security.SaslPlainServer;
+import org.apache.hadoop.security.SaslPropertiesResolver;
 import org.apache.hadoop.security.SaslRpcClient;
 import org.apache.hadoop.security.SaslRpcServer;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
@@ -87,15 +99,29 @@ public class TestSaslRPC {
   public static Collection<Object[]> data() {
     Collection<Object[]> params = new ArrayList<Object[]>();
     for (QualityOfProtection qop : QualityOfProtection.values()) {
-      params.add(new Object[]{ qop });
+      params.add(new Object[]{ new QualityOfProtection[]{qop},qop, null });
     }
+    params.add(new Object[]{ new QualityOfProtection[]{
+        QualityOfProtection.PRIVACY,QualityOfProtection.AUTHENTICATION },
+        QualityOfProtection.PRIVACY, null});
+    params.add(new Object[]{ new QualityOfProtection[]{
+        QualityOfProtection.PRIVACY,QualityOfProtection.AUTHENTICATION },
+        QualityOfProtection.AUTHENTICATION ,
+        "org.apache.hadoop.ipc.TestSaslRPC$AuthSaslPropertiesResolver" });
+
     return params;
   }
 
+  QualityOfProtection[] qop;
   QualityOfProtection expectedQop;
+  String saslPropertiesResolver ;
   
-  public TestSaslRPC(QualityOfProtection qop) {
-    expectedQop = qop;
+  public TestSaslRPC(QualityOfProtection[] qop,
+      QualityOfProtection expectedQop,
+      String saslPropertiesResolver) {
+    this.qop=qop;
+    this.expectedQop = expectedQop;
+    this.saslPropertiesResolver = saslPropertiesResolver;
   }
   
   private static final String ADDRESS = "0.0.0.0";
@@ -134,17 +160,33 @@ public class TestSaslRPC {
   @Before
   public void setup() {
     LOG.info("---------------------------------");
-    LOG.info("Testing QOP:"+expectedQop);
+    LOG.info("Testing QOP:"+ getQOPNames(qop));
     LOG.info("---------------------------------");
     conf = new Configuration();
     // the specific tests for kerberos will enable kerberos.  forcing it
     // for all tests will cause tests to fail if the user has a TGT
     conf.set(HADOOP_SECURITY_AUTHENTICATION, SIMPLE.toString());
-    conf.set("hadoop.rpc.protection", expectedQop.name().toLowerCase());
+    conf.set(HADOOP_RPC_PROTECTION, getQOPNames(qop));
+    if (saslPropertiesResolver != null){
+      conf.set(CommonConfigurationKeys.HADOOP_SECURITY_SASL_PROPS_RESOLVER_CLASS,
+        saslPropertiesResolver);
+    }
     UserGroupInformation.setConfiguration(conf);
     enableSecretManager = null;
     forceSecretManager = null;
     clientFallBackToSimpleAllowed = true;
+  }
+
+  static String getQOPNames (QualityOfProtection[] qops){
+    StringBuilder sb = new StringBuilder();
+    int i = 0;
+    for (QualityOfProtection qop:qops){
+     sb.append(qop.name().toLowerCase());
+     if (++i < qops.length){
+       sb.append(",");
+     }
+    }
+    return sb.toString();
   }
 
   static {
@@ -939,6 +981,19 @@ public class TestSaslRPC {
     }
   }
 
+  /*
+   * Class used to test overriding QOP values using SaslPropertiesResolver
+   */
+  static class AuthSaslPropertiesResolver extends SaslPropertiesResolver{
+
+    @Override
+    public Map<String, String> getServerProperties(InetAddress address) {
+      Map<String, String> newPropertes = new HashMap<String, String>(getDefaultProperties());
+      newPropertes.put(Sasl.QOP, QualityOfProtection.AUTHENTICATION.getSaslQop());
+      return newPropertes;
+    }
+  }
+  
   public static void main(String[] args) throws Exception {
     System.out.println("Testing Kerberos authentication over RPC");
     if (args.length != 2) {

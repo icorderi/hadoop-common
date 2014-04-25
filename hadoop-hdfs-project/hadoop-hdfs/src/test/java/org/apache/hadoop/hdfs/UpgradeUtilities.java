@@ -40,13 +40,13 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.BlockPoolSliceStorage;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
@@ -67,10 +67,10 @@ import com.google.common.primitives.Bytes;
 public class UpgradeUtilities {
 
   // Root scratch directory on local filesystem 
-  private static File TEST_ROOT_DIR = 
+  private static final File TEST_ROOT_DIR =
                       new File(MiniDFSCluster.getBaseDirectory());
   // The singleton master storage directory for Namenode
-  private static File namenodeStorage = new File(TEST_ROOT_DIR, "namenodeMaster");
+  private static final File namenodeStorage = new File(TEST_ROOT_DIR, "namenodeMaster");
   // A checksum of the contents in namenodeStorage directory
   private static long namenodeStorageChecksum;
   // The namespaceId of the namenodeStorage directory
@@ -82,7 +82,7 @@ public class UpgradeUtilities {
   // The fsscTime of the namenodeStorage directory
   private static long namenodeStorageFsscTime;
   // The singleton master storage directory for Datanode
-  private static File datanodeStorage = new File(TEST_ROOT_DIR, "datanodeMaster");
+  private static final File datanodeStorage = new File(TEST_ROOT_DIR, "datanodeMaster");
   // A checksum of the contents in datanodeStorage directory
   private static long datanodeStorageChecksum;
   // A checksum of the contents in blockpool storage directory
@@ -290,10 +290,14 @@ public class UpgradeUtilities {
       if (!list[i].isFile()) {
         continue;
       }
-      // skip VERSION file for DataNodes
-      if (nodeType == DATA_NODE && list[i].getName().equals("VERSION")) {
+
+      // skip VERSION and dfsUsed file for DataNodes
+      if (nodeType == DATA_NODE && 
+         (list[i].getName().equals("VERSION") || 
+         list[i].getName().equals("dfsUsed"))) {
         continue; 
       }
+
       FileInputStream fis = null;
       try {
         fis = new FileInputStream(list[i]);
@@ -471,7 +475,8 @@ public class UpgradeUtilities {
   public static void createBlockPoolVersionFile(File bpDir,
       StorageInfo version, String bpid) throws IOException {
     // Create block pool version files
-    if (LayoutVersion.supports(Feature.FEDERATION, version.layoutVersion)) {
+    if (DataNodeLayoutVersion.supports(
+        LayoutVersion.Feature.FEDERATION, version.layoutVersion)) {
       File bpCurDir = new File(bpDir, Storage.STORAGE_DIR_CURRENT);
       BlockPoolSliceStorage bpStorage = new BlockPoolSliceStorage(version,
           bpid);
@@ -514,8 +519,8 @@ public class UpgradeUtilities {
    * Return the layout version inherent in the current version
    * of the Namenode, whether it is running or not.
    */
-  public static int getCurrentLayoutVersion() {
-    return HdfsConstants.LAYOUT_VERSION;
+  public static int getCurrentNameNodeLayoutVersion() {
+    return HdfsConstants.NAMENODE_LAYOUT_VERSION;
   }
   
   /**

@@ -18,7 +18,6 @@
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -27,8 +26,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import javax.management.ObjectName;
+
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.SnapshotException;
+import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
@@ -38,6 +40,7 @@ import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.INodesInPath;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectorySnapshottable.SnapshotDiffInfo;
+import org.apache.hadoop.metrics2.util.MBeans;
 
 /**
  * Manage snapshottable directories and their snapshots.
@@ -51,7 +54,7 @@ import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectorySnapshottab
  * 2. Lock the {@link FSDirectory} lock for the {@link SnapshotManager} methods
  * if necessary.
  */
-public class SnapshotManager implements SnapshotStats {
+public class SnapshotManager implements SnapshotStatsMXBean {
   private boolean allowNestedSnapshots = false;
   private final FSDirectory fsdir;
   private static final int SNAPSHOT_ID_BIT_WIDTH = 24;
@@ -260,30 +263,29 @@ public class SnapshotManager implements SnapshotStats {
     srcRoot.renameSnapshot(path, oldSnapshotName, newSnapshotName);
   }
   
-  @Override
   public int getNumSnapshottableDirs() {
     return snapshottables.size();
   }
 
-  @Override
   public int getNumSnapshots() {
     return numSnapshots.get();
   }
   
-  /**
-   * Write {@link #snapshotCounter}, {@link #numSnapshots},
-   * and all snapshots to the DataOutput.
-   */
-  public void write(DataOutput out) throws IOException {
-    out.writeInt(snapshotCounter);
-    out.writeInt(numSnapshots.get());
+  void setNumSnapshots(int num) {
+    numSnapshots.set(num);
+  }
 
-    // write all snapshots.
-    for(INodeDirectorySnapshottable snapshottableDir : snapshottables.values()) {
-      for(Snapshot s : snapshottableDir.getSnapshotsByNames()) {
-        s.write(out);
-      }
-    }
+  int getSnapshotCounter() {
+    return snapshotCounter;
+  }
+
+  void setSnapshotCounter(int counter) {
+    snapshotCounter = counter;
+  }
+
+  INodeDirectorySnapshottable[] getSnapshottableDirs() {
+    return snapshottables.values().toArray(
+        new INodeDirectorySnapshottable[snapshottables.size()]);
   }
   
   /**
@@ -371,5 +373,57 @@ public class SnapshotManager implements SnapshotStats {
    */
    public int getMaxSnapshotID() {
     return ((1 << SNAPSHOT_ID_BIT_WIDTH) - 1);
+  }
+
+  private ObjectName mxBeanName;
+
+  public void registerMXBean() {
+    mxBeanName = MBeans.register("NameNode", "SnapshotInfo", this);
+  }
+
+  public void shutdown() {
+    MBeans.unregister(mxBeanName);
+    mxBeanName = null;
+  }
+
+  @Override // SnapshotStatsMXBean
+  public SnapshottableDirectoryStatus.Bean[]
+    getSnapshottableDirectories() {
+    List<SnapshottableDirectoryStatus.Bean> beans =
+        new ArrayList<SnapshottableDirectoryStatus.Bean>();
+    for (INodeDirectorySnapshottable d : getSnapshottableDirs()) {
+      beans.add(toBean(d));
+    }
+    return beans.toArray(new SnapshottableDirectoryStatus.Bean[beans.size()]);
+  }
+
+  @Override // SnapshotStatsMXBean
+  public SnapshotInfo.Bean[] getSnapshots() {
+    List<SnapshotInfo.Bean> beans = new ArrayList<SnapshotInfo.Bean>();
+    for (INodeDirectorySnapshottable d : getSnapshottableDirs()) {
+      for (Snapshot s : d.getSnapshotList()) {
+        beans.add(toBean(s));
+      }
+    }
+    return beans.toArray(new SnapshotInfo.Bean[beans.size()]);
+  }
+
+  public static SnapshottableDirectoryStatus.Bean toBean(
+      INodeDirectorySnapshottable d) {
+    return new SnapshottableDirectoryStatus.Bean(
+        d.getFullPathName(),
+        d.getNumSnapshots(),
+        d.getSnapshotQuota(),
+        d.getModificationTime(),
+        Short.valueOf(Integer.toOctalString(
+            d.getFsPermissionShort())),
+        d.getUserName(),
+        d.getGroupName());
+  }
+
+  public static SnapshotInfo.Bean toBean(Snapshot s) {
+    return new SnapshotInfo.Bean(
+        s.getRoot().getLocalName(), s.getRoot().getFullPathName(),
+        s.getRoot().getModificationTime());
   }
 }

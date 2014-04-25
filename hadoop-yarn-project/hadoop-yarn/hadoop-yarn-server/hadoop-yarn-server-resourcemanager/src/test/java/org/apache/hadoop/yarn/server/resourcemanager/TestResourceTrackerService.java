@@ -21,15 +21,21 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 
-import junit.framework.Assert;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.metrics2.MetricsSystem;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.Container;
+import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
@@ -37,24 +43,35 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.DrainDispatcher;
+import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerResponse;
 import org.apache.hadoop.yarn.server.api.records.NodeAction;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
+
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 public class TestResourceTrackerService {
 
   private final static File TEMP_DIR = new File(System.getProperty(
       "test.build.data", "/tmp"), "decommision");
-  private File hostFile = new File(TEMP_DIR + File.separator + "hostFile.txt");
+  private final File hostFile = new File(TEMP_DIR + File.separator + "hostFile.txt");
   private MockRM rm;
 
   /**
@@ -150,7 +167,6 @@ public class TestResourceTrackerService {
     MockNM nm3 = rm.registerNode("localhost:4433", 1024);
 
     int metricCount = ClusterMetrics.getMetrics().getNumDecommisionedNMs();
-
     NodeHeartbeatResponse nodeHeartbeat = nm1.nodeHeartbeat(true);
     Assert.assertTrue(NodeAction.NORMAL.equals(nodeHeartbeat.getNodeAction()));
     nodeHeartbeat = nm2.nodeHeartbeat(true);
@@ -161,18 +177,17 @@ public class TestResourceTrackerService {
     writeToHostsFile("host2", ip);
 
     rm.getNodesListManager().refreshNodes(conf);
+    checkDecommissionedNMCount(rm, metricCount + 2);
 
     nodeHeartbeat = nm1.nodeHeartbeat(true);
     Assert.assertTrue(NodeAction.NORMAL.equals(nodeHeartbeat.getNodeAction()));
     nodeHeartbeat = nm2.nodeHeartbeat(true);
     Assert.assertTrue("The decommisioned metrics are not updated",
         NodeAction.SHUTDOWN.equals(nodeHeartbeat.getNodeAction()));
-    checkDecommissionedNMCount(rm, ++metricCount);
 
     nodeHeartbeat = nm3.nodeHeartbeat(true);
     Assert.assertTrue("The decommisioned metrics are not updated",
         NodeAction.SHUTDOWN.equals(nodeHeartbeat.getNodeAction()));
-    checkDecommissionedNMCount(rm, ++metricCount);
   }
 
   /**
@@ -459,10 +474,70 @@ public class TestResourceTrackerService {
         ClusterMetrics.getMetrics().getUnhealthyNMs());
   }
 
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleContainerStatusInvalidCompletions() throws Exception {
+    rm = new MockRM(new YarnConfiguration());
+    rm.start();
+
+    EventHandler handler =
+        spy(rm.getRMContext().getDispatcher().getEventHandler());
+
+    // Case 1: Unmanaged AM
+    RMApp app = rm.submitApp(1024, true);
+
+    // Case 1.1: AppAttemptId is null
+    ContainerStatus status = ContainerStatus.newInstance(
+        ContainerId.newInstance(ApplicationAttemptId.newInstance(
+            app.getApplicationId(), 2), 1),
+        ContainerState.COMPLETE, "Dummy Completed", 0);
+    rm.getResourceTrackerService().handleContainerStatus(status);
+    verify(handler, never()).handle((Event) any());
+
+    // Case 1.2: Master container is null
+    RMAppAttemptImpl currentAttempt =
+        (RMAppAttemptImpl) app.getCurrentAppAttempt();
+    currentAttempt.setMasterContainer(null);
+    status = ContainerStatus.newInstance(
+        ContainerId.newInstance(currentAttempt.getAppAttemptId(), 0),
+        ContainerState.COMPLETE, "Dummy Completed", 0);
+    rm.getResourceTrackerService().handleContainerStatus(status);
+    verify(handler, never()).handle((Event)any());
+
+    // Case 2: Managed AM
+    app = rm.submitApp(1024);
+
+    // Case 2.1: AppAttemptId is null
+    status = ContainerStatus.newInstance(
+        ContainerId.newInstance(ApplicationAttemptId.newInstance(
+            app.getApplicationId(), 2), 1),
+        ContainerState.COMPLETE, "Dummy Completed", 0);
+    try {
+      rm.getResourceTrackerService().handleContainerStatus(status);
+    } catch (Exception e) {
+      // expected - ignore
+    }
+    verify(handler, never()).handle((Event)any());
+
+    // Case 2.2: Master container is null
+    currentAttempt =
+        (RMAppAttemptImpl) app.getCurrentAppAttempt();
+    currentAttempt.setMasterContainer(null);
+    status = ContainerStatus.newInstance(
+        ContainerId.newInstance(currentAttempt.getAppAttemptId(), 0),
+        ContainerState.COMPLETE, "Dummy Completed", 0);
+    try {
+      rm.getResourceTrackerService().handleContainerStatus(status);
+    } catch (Exception e) {
+      // expected - ignore
+    }
+    verify(handler, never()).handle((Event)any());
+  }
+
   @Test
   public void testReconnectNode() throws Exception {
     final DrainDispatcher dispatcher = new DrainDispatcher();
-    MockRM rm = new MockRM() {
+    rm = new MockRM() {
       @Override
       protected EventHandler<SchedulerEvent> createSchedulerEventDispatcher() {
         return new SchedulerEventDispatcher(this.scheduler) {
@@ -564,9 +639,15 @@ public class TestResourceTrackerService {
     if (hostFile != null && hostFile.exists()) {
       hostFile.delete();
     }
+
     ClusterMetrics.destroy();
     if (rm != null) {
       rm.stop();
+    }
+
+    MetricsSystem ms = DefaultMetricsSystem.instance();
+    if (ms.getSource("ClusterMetrics") != null) {
+      DefaultMetricsSystem.shutdown();
     }
   }
 }

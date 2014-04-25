@@ -76,6 +76,8 @@ import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.AuxiliaryServiceHelper;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
+import com.google.common.annotations.VisibleForTesting;
+
 public class ContainerLaunch implements Callable<Integer> {
 
   private static final Log LOG = LogFactory.getLog(ContainerLaunch.class);
@@ -124,6 +126,25 @@ public class ContainerLaunch implements Callable<Integer> {
             YarnConfiguration.DEFAULT_NM_PROCESS_KILL_WAIT_MS);
   }
 
+  @VisibleForTesting
+  public static String expandEnvironment(String var,
+      Path containerLogDir) {
+    var = var.replace(ApplicationConstants.LOG_DIR_EXPANSION_VAR,
+      containerLogDir.toString());
+    var =  var.replace(ApplicationConstants.CLASS_PATH_SEPARATOR,
+      File.pathSeparator);
+
+    // replace parameter expansion marker. e.g. {{VAR}} on Windows is replaced
+    // as %VAR% and on Linux replaced as "$VAR"
+    if (Shell.WINDOWS) {
+      var = var.replaceAll("(\\{\\{)|(\\}\\})", "%");
+    } else {
+      var = var.replace(ApplicationConstants.PARAMETER_EXPANSION_LEFT, "$");
+      var = var.replace(ApplicationConstants.PARAMETER_EXPANSION_RIGHT, "");
+    }
+    return var;
+  }
+
   @Override
   @SuppressWarnings("unchecked") // dispatcher not typed
   public Integer call() {
@@ -165,8 +186,7 @@ public class ContainerLaunch implements Callable<Integer> {
           dirsHandler.getLogPathForWrite(relativeContainerLogDir, false);
       for (String str : command) {
         // TODO: Should we instead work via symlinks without this grammar?
-        newCmds.add(str.replace(ApplicationConstants.LOG_DIR_EXPANSION_VAR,
-            containerLogDir.toString()));
+        newCmds.add(expandEnvironment(str, containerLogDir));
       }
       launchContext.setCommands(newCmds);
 
@@ -174,11 +194,8 @@ public class ContainerLaunch implements Callable<Integer> {
       // Make a copy of env to iterate & do variable expansion
       for (Entry<String, String> entry : environment.entrySet()) {
         String value = entry.getValue();
-        entry.setValue(
-            value.replace(
-                ApplicationConstants.LOG_DIR_EXPANSION_VAR,
-                containerLogDir.toString())
-            );
+        value = expandEnvironment(value, containerLogDir);
+        entry.setValue(value);
       }
       // /////////////////////////// End of variable expansion
 
@@ -462,15 +479,20 @@ public class ContainerLaunch implements Callable<Integer> {
         + appIdStr;
   }
 
-  private static abstract class ShellScriptBuilder {
+  @VisibleForTesting
+  static abstract class ShellScriptBuilder {
+    public static ShellScriptBuilder create() {
+      return Shell.WINDOWS ? new WindowsShellScriptBuilder() :
+        new UnixShellScriptBuilder();
+    }
 
     private static final String LINE_SEPARATOR =
         System.getProperty("line.separator");
     private final StringBuilder sb = new StringBuilder();
 
-    public abstract void command(List<String> command);
+    public abstract void command(List<String> command) throws IOException;
 
-    public abstract void env(String key, String value);
+    public abstract void env(String key, String value) throws IOException;
 
     public final void symlink(Path src, Path dst) throws IOException {
       if (!src.isAbsolute()) {
@@ -503,10 +525,18 @@ public class ContainerLaunch implements Callable<Integer> {
 
     protected abstract void link(Path src, Path dst) throws IOException;
 
-    protected abstract void mkdir(Path path);
+    protected abstract void mkdir(Path path) throws IOException;
   }
 
   private static final class UnixShellScriptBuilder extends ShellScriptBuilder {
+
+    private void errorCheck() {
+      line("hadoop_shell_errorcode=$?");
+      line("if [ $hadoop_shell_errorcode -ne 0 ]");
+      line("then");
+      line("  exit $hadoop_shell_errorcode");
+      line("fi");
+    }
 
     public UnixShellScriptBuilder(){
       line("#!/bin/bash");
@@ -516,6 +546,7 @@ public class ContainerLaunch implements Callable<Integer> {
     @Override
     public void command(List<String> command) {
       line("exec /bin/bash -c \"", StringUtils.join(" ", command), "\"");
+      errorCheck();
     }
 
     @Override
@@ -526,16 +557,27 @@ public class ContainerLaunch implements Callable<Integer> {
     @Override
     protected void link(Path src, Path dst) throws IOException {
       line("ln -sf \"", src.toUri().getPath(), "\" \"", dst.toString(), "\"");
+      errorCheck();
     }
 
     @Override
     protected void mkdir(Path path) {
       line("mkdir -p ", path.toString());
+      errorCheck();
     }
   }
 
   private static final class WindowsShellScriptBuilder
       extends ShellScriptBuilder {
+
+    private void errorCheck() {
+      line("@if %errorlevel% neq 0 exit /b %errorlevel%");
+    }
+
+    private void lineWithLenCheck(String... commands) throws IOException {
+      Shell.checkWindowsCommandLineLength(commands);
+      line(commands);
+    }
 
     public WindowsShellScriptBuilder() {
       line("@setlocal");
@@ -543,14 +585,15 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     @Override
-    public void command(List<String> command) {
-      line("@call ", StringUtils.join(" ", command));
+    public void command(List<String> command) throws IOException {
+      lineWithLenCheck("@call ", StringUtils.join(" ", command));
+      errorCheck();
     }
 
     @Override
-    public void env(String key, String value) {
-      line("@set ", key, "=", value,
-          "\nif %errorlevel% neq 0 exit /b %errorlevel%");
+    public void env(String key, String value) throws IOException {
+      lineWithLenCheck("@set ", key, "=", value);
+      errorCheck();
     }
 
     @Override
@@ -561,16 +604,20 @@ public class ContainerLaunch implements Callable<Integer> {
       // If not on Java7+ on Windows, then copy file instead of symlinking.
       // See also FileUtil#symLink for full explanation.
       if (!Shell.isJava7OrAbove() && srcFile.isFile()) {
-        line(String.format("@copy \"%s\" \"%s\"", srcFileStr, dstFileStr));
+        lineWithLenCheck(String.format("@copy \"%s\" \"%s\"", srcFileStr, dstFileStr));
+        errorCheck();
       } else {
-        line(String.format("@%s symlink \"%s\" \"%s\"", Shell.WINUTILS,
+        lineWithLenCheck(String.format("@%s symlink \"%s\" \"%s\"", Shell.WINUTILS,
           dstFileStr, srcFileStr));
+        errorCheck();
       }
     }
 
     @Override
-    protected void mkdir(Path path) {
-      line("@if not exist ", path.toString(), " mkdir ", path.toString());
+    protected void mkdir(Path path) throws IOException {
+      lineWithLenCheck(String.format("@if not exist \"%s\" mkdir \"%s\"",
+          path.toString(), path.toString()));
+      errorCheck();
     }
   }
 
@@ -647,12 +694,9 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     // variables here will be forced in, even if the container has specified them.
-    Apps.setEnvFromInputString(
-      environment,
-      conf.get(
-        YarnConfiguration.NM_ADMIN_USER_ENV,
-        YarnConfiguration.DEFAULT_NM_ADMIN_USER_ENV)
-    );
+    Apps.setEnvFromInputString(environment, conf.get(
+      YarnConfiguration.NM_ADMIN_USER_ENV,
+      YarnConfiguration.DEFAULT_NM_ADMIN_USER_ENV), File.pathSeparator);
 
     // TODO: Remove Windows check and use this approach on all platforms after
     // additional testing.  See YARN-358.
@@ -716,8 +760,7 @@ public class ContainerLaunch implements Callable<Integer> {
       Map<String,String> environment, Map<Path,List<String>> resources,
       List<String> command)
       throws IOException {
-    ShellScriptBuilder sb = Shell.WINDOWS ? new WindowsShellScriptBuilder() :
-      new UnixShellScriptBuilder();
+    ShellScriptBuilder sb = ShellScriptBuilder.create();
     if (environment != null) {
       for (Map.Entry<String,String> env : environment.entrySet()) {
         sb.env(env.getKey().toString(), env.getValue().toString());

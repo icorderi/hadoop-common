@@ -28,7 +28,7 @@
       {"name": "nn",      "url": "/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo"},
       {"name": "nnstat",  "url": "/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus"},
       {"name": "fs",      "url": "/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState"},
-      {"name": "mem",     "url": "/jmx?qry=java.lang:type=Memory"},
+      {"name": "mem",     "url": "/jmx?qry=java.lang:type=Memory"}
     ];
 
     var HELPERS = {
@@ -44,30 +44,34 @@
         for (var i in j) {
           chunk.write('<tr><td>' + i + '</td><td>' + j[i] + '</td><td>' + params.type + '</td></tr>');
         }
+      },
+
+      'helper_date_tostring' : function (chunk, ctx, bodies, params) {
+        var value = dust.helpers.tap(params.value, chunk, ctx);
+        return chunk.write('' + new Date(Number(value)).toLocaleString());
       }
     };
 
     var data = {};
 
     // Workarounds for the fact that JMXJsonServlet returns non-standard JSON strings
-    function data_workaround(d) {
-      d.nn.JournalTransactionInfo = JSON.parse(d.nn.JournalTransactionInfo);
-      d.nn.NameJournalStatus = JSON.parse(d.nn.NameJournalStatus);
-      d.nn.NameDirStatuses = JSON.parse(d.nn.NameDirStatuses);
-      d.nn.NodeUsage = JSON.parse(d.nn.NodeUsage);
-      d.nn.CorruptFiles = JSON.parse(d.nn.CorruptFiles);
-      return d;
+    function workaround(nn) {
+      nn.JournalTransactionInfo = JSON.parse(nn.JournalTransactionInfo);
+      nn.NameJournalStatus = JSON.parse(nn.NameJournalStatus);
+      nn.NameDirStatuses = JSON.parse(nn.NameDirStatuses);
+      nn.NodeUsage = JSON.parse(nn.NodeUsage);
+      nn.CorruptFiles = JSON.parse(nn.CorruptFiles);
+      return nn;
     }
 
     load_json(
       BEANS,
-      function(d) {
+      guard_with_startup_progress(function(d) {
         for (var k in d) {
-          data[k] = d[k].beans[0];
+          data[k] = k === 'nn' ? workaround(d[k].beans[0]) : d[k].beans[0];
         }
-        data = data_workaround(data);
         render();
-      },
+      }),
       function (url, jqxhr, text, err) {
         show_err_msg('<p>Failed to retrieve data from ' + url + ', cause: ' + err + '</p>');
       });
@@ -76,12 +80,10 @@
       var base = dust.makeBase(HELPERS);
       dust.render('dfshealth', base.push(data), function(err, out) {
         $('#tab-overview').html(out);
-        $('a[href="#tab-datanode"]').click(load_datanode_info);
         $('#ui-tabs a[href="#tab-overview"]').tab('show');
       });
     }
   }
-  $('#ui-tabs a[href="#tab-overview"]').click(load_overview);
 
   function show_err_msg(msg) {
     $('#alert-panel-body').html(msg);
@@ -90,6 +92,19 @@
 
   function ajax_error_handler(url, jqxhr, text, err) {
     show_err_msg('<p>Failed to retrieve data from ' + url + ', cause: ' + err + '</p>');
+  }
+
+  function guard_with_startup_progress(fn) {
+    return function() {
+      try {
+        fn.apply(this, arguments);
+      } catch (err) {
+        if (err instanceof TypeError) {
+          show_err_msg('NameNode is still loading. Redirecting to the Startup Progress page.');
+          load_startup_progress();
+        }
+      }
+    };
   }
 
   function load_startup_progress() {
@@ -123,8 +138,6 @@
     }).error(ajax_error_handler);
   }
 
-  $('#ui-tabs a[href="#tab-startup-progress"]').click(load_startup_progress);
-
   function load_datanode_info() {
     function workaround(r) {
       function node_map_to_array(nodes) {
@@ -143,37 +156,51 @@
       return r;
     }
 
-    $.get('/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo', function (resp) {
-      var data = workaround(resp.beans[0]);
-      dust.render('datanode-info', data, function(err, out) {
-        $('#tab-datanode').html(out);
-        $('#ui-tabs a[href="#tab-datanode"]').tab('show');
-      });
-    }).error(ajax_error_handler);
+    $.get(
+      '/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo',
+      guard_with_startup_progress(function (resp) {
+        var data = workaround(resp.beans[0]);
+        dust.render('datanode-info', data, function(err, out) {
+          $('#tab-datanode').html(out);
+          $('#ui-tabs a[href="#tab-datanode"]').tab('show');
+        });
+      })).error(ajax_error_handler);
   }
-
-  $('a[href="#tab-datanode"]').click(load_datanode_info);
 
   function load_snapshot_info() {
-    $.get('/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState', function (resp) {
-      var data = JSON.parse(resp.beans[0].SnapshotStats);
-      dust.render('snapshot-info', data, function(err, out) {
-        $('#tab-snapshot').html(out);
-        $('#ui-tabs a[href="#tab-snapshot"]').tab('show');
-      });
-    }).error(ajax_error_handler);
+    $.get(
+      '/jmx?qry=Hadoop:service=NameNode,name=SnapshotInfo',
+      guard_with_startup_progress(function (resp) {
+      dust.render('snapshot-info', resp.beans[0], function(err, out) {
+          $('#tab-snapshot').html(out);
+          $('#ui-tabs a[href="#tab-snapshot"]').tab('show');
+        });
+      })).error(ajax_error_handler);
   }
 
-  $('#ui-tabs a[href="#tab-snapshot"]').click(load_snapshot_info);
-
-  var hash = window.location.hash;
-  if (hash === "#tab-datanode") {
-    load_datanode_info();
-  } else if (hash === "#tab-snapshot") {
-    load_snapshot_info();
-  } else if (hash === "#tab-startup-progress") {
-    load_startup_progress();
-  } else {
-    load_overview();
+  function load_page() {
+    var hash = window.location.hash;
+    switch(hash) {
+      case "#tab-datanode":
+        load_datanode_info();
+        break;
+      case "#tab-snapshot":
+        load_snapshot_info();
+        break;
+      case "#tab-startup-progress":
+        load_startup_progress();
+        break;
+      case "#tab-overview":
+        load_overview();
+        break;
+      default:
+        window.location.hash = "tab-overview";
+        break;
+    }
   }
+  load_page();
+
+  $(window).bind('hashchange', function () {
+    load_page();
+  });
 })();

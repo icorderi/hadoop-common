@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hdfs.nfs.nfs3;
 
+import org.apache.commons.logging.LogFactory;
+
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
@@ -26,8 +28,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.hdfs.DFSClient;
@@ -163,8 +165,9 @@ class DFSClientCache {
     return new CacheLoader<String, DFSClient>() {
       @Override
       public DFSClient load(String userName) throws Exception {
-        UserGroupInformation ugi = UserGroupInformation
-            .createRemoteUser(userName);
+        UserGroupInformation ugi = getUserGroupInformation(
+                userName,
+                UserGroupInformation.getCurrentUser());
 
         // Guava requires CacheLoader never returns null.
         return ugi.doAs(new PrivilegedExceptionAction<DFSClient>() {
@@ -175,6 +178,30 @@ class DFSClientCache {
         });
       }
     };
+  }
+
+  /**
+   * This method uses the currentUser, and real user to create a proxy
+   * @param effectiveUser The user who is being proxied by the real user
+   * @param realUser The actual user who does the command
+   * @return Proxy UserGroupInformation
+   * @throws IOException If proxying fails
+   */
+  UserGroupInformation getUserGroupInformation(
+          String effectiveUser,
+          UserGroupInformation realUser)
+          throws IOException {
+    Preconditions.checkNotNull(effectiveUser);
+    Preconditions.checkNotNull(realUser);
+    realUser.checkTGTAndReloginFromKeytab();
+
+    UserGroupInformation ugi =
+            UserGroupInformation.createProxyUser(effectiveUser, realUser);
+    if (LOG.isDebugEnabled()){
+      LOG.debug(String.format("Created ugi:" +
+              " %s for username: %s", ugi, effectiveUser));
+    }
+    return ugi;
   }
 
   private RemovalListener<String, DFSClient> clientRemovalListener() {

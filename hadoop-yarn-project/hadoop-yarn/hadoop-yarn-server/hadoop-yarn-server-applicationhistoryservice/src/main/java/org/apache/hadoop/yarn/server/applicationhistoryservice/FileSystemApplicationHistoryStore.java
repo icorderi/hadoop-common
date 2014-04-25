@@ -113,7 +113,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
   @Override
   public void serviceInit(Configuration conf) throws Exception {
     Path fsWorkingPath =
-        new Path(conf.get(YarnConfiguration.FS_HISTORY_STORE_URI));
+        new Path(conf.get(YarnConfiguration.FS_APPLICATION_HISTORY_STORE_URI));
     rootDirPath = new Path(fsWorkingPath, ROOT_DIR_NAME);
     try {
       fs = fsWorkingPath.getFileSystem(conf);
@@ -179,7 +179,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       LOG.info("Completed reading history information of application " + appId);
       return historyData;
     } catch (IOException e) {
-      LOG.error("Error when reading history file of application " + appId);
+      LOG.error("Error when reading history file of application " + appId, e);
       throw e;
     } finally {
       hfReader.close();
@@ -215,17 +215,30 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       getApplicationAttempts(ApplicationId appId) throws IOException {
     Map<ApplicationAttemptId, ApplicationAttemptHistoryData> historyDataMap =
         new HashMap<ApplicationAttemptId, ApplicationAttemptHistoryData>();
-    Map<ApplicationAttemptId, StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData>> startFinshDataMap =
-        new HashMap<ApplicationAttemptId, StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData>>();
     HistoryFileReader hfReader = getHistoryFileReader(appId);
     try {
       while (hfReader.hasNext()) {
         HistoryFileReader.Entry entry = hfReader.next();
-        if (entry.key.id.startsWith(ConverterUtils.APPLICATION_ATTEMPT_PREFIX)) {
-          if (entry.key.suffix.equals(START_DATA_SUFFIX)) {
-            retrieveStartFinishData(appId, entry, startFinshDataMap, true);
-          } else if (entry.key.suffix.equals(FINISH_DATA_SUFFIX)) {
-            retrieveStartFinishData(appId, entry, startFinshDataMap, false);
+        if (entry.key.id.startsWith(
+            ConverterUtils.APPLICATION_ATTEMPT_PREFIX)) {
+          ApplicationAttemptId appAttemptId = 
+              ConverterUtils.toApplicationAttemptId(entry.key.id);
+          if (appAttemptId.getApplicationId().equals(appId)) {
+            ApplicationAttemptHistoryData historyData = 
+                historyDataMap.get(appAttemptId);
+            if (historyData == null) {
+              historyData = ApplicationAttemptHistoryData.newInstance(
+                  appAttemptId, null, -1, null, null, null,
+                  FinalApplicationStatus.UNDEFINED, null);
+              historyDataMap.put(appAttemptId, historyData);
+            }
+            if (entry.key.suffix.equals(START_DATA_SUFFIX)) {
+              mergeApplicationAttemptHistoryData(historyData,
+                  parseApplicationAttemptStartData(entry.value));
+            } else if (entry.key.suffix.equals(FINISH_DATA_SUFFIX)) {
+              mergeApplicationAttemptHistoryData(historyData,
+                  parseApplicationAttemptFinishData(entry.value));
+            }
           }
         }
       }
@@ -237,43 +250,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
     } finally {
       hfReader.close();
     }
-    for (Map.Entry<ApplicationAttemptId, StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData>> entry : startFinshDataMap
-      .entrySet()) {
-      ApplicationAttemptHistoryData historyData =
-          ApplicationAttemptHistoryData.newInstance(entry.getKey(), null, -1,
-            null, null, null, FinalApplicationStatus.UNDEFINED, null);
-      mergeApplicationAttemptHistoryData(historyData,
-        entry.getValue().startData);
-      mergeApplicationAttemptHistoryData(historyData,
-        entry.getValue().finishData);
-      historyDataMap.put(entry.getKey(), historyData);
-    }
     return historyDataMap;
-  }
-
-  private
-      void
-      retrieveStartFinishData(
-          ApplicationId appId,
-          HistoryFileReader.Entry entry,
-          Map<ApplicationAttemptId, StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData>> startFinshDataMap,
-          boolean start) throws IOException {
-    ApplicationAttemptId appAttemptId =
-        ConverterUtils.toApplicationAttemptId(entry.key.id);
-    if (appAttemptId.getApplicationId().equals(appId)) {
-      StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData> pair =
-          startFinshDataMap.get(appAttemptId);
-      if (pair == null) {
-        pair =
-            new StartFinishDataPair<ApplicationAttemptStartData, ApplicationAttemptFinishData>();
-        startFinshDataMap.put(appAttemptId, pair);
-      }
-      if (start) {
-        pair.startData = parseApplicationAttemptStartData(entry.value);
-      } else {
-        pair.finishData = parseApplicationAttemptFinishData(entry.value);
-      }
-    }
   }
 
   @Override
@@ -319,7 +296,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       return historyData;
     } catch (IOException e) {
       LOG.error("Error when reading history file of application attempt"
-          + appAttemptId);
+          + appAttemptId, e);
       throw e;
     } finally {
       hfReader.close();
@@ -338,7 +315,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       ContainerHistoryData historyData =
           ContainerHistoryData
             .newInstance(containerId, null, null, null, Long.MIN_VALUE,
-              Long.MAX_VALUE, null, null, Integer.MAX_VALUE, null);
+              Long.MAX_VALUE, null, Integer.MAX_VALUE, null);
       while ((!readStartData || !readFinishData) && hfReader.hasNext()) {
         HistoryFileReader.Entry entry = hfReader.next();
         if (entry.key.id.equals(containerId.toString())) {
@@ -367,7 +344,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + containerId);
       return historyData;
     } catch (IOException e) {
-      LOG.error("Error when reading history file of container " + containerId);
+      LOG.error("Error when reading history file of container " + containerId, e);
       throw e;
     } finally {
       hfReader.close();
@@ -391,20 +368,30 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       ApplicationAttemptId appAttemptId) throws IOException {
     Map<ContainerId, ContainerHistoryData> historyDataMap =
         new HashMap<ContainerId, ContainerHistoryData>();
-    Map<ContainerId, StartFinishDataPair<ContainerStartData, ContainerFinishData>> startFinshDataMap =
-        new HashMap<ContainerId, StartFinishDataPair<ContainerStartData, ContainerFinishData>>();
     HistoryFileReader hfReader =
         getHistoryFileReader(appAttemptId.getApplicationId());
     try {
       while (hfReader.hasNext()) {
         HistoryFileReader.Entry entry = hfReader.next();
         if (entry.key.id.startsWith(ConverterUtils.CONTAINER_PREFIX)) {
-          if (entry.key.suffix.equals(START_DATA_SUFFIX)) {
-            retrieveStartFinishData(appAttemptId, entry, startFinshDataMap,
-              true);
-          } else if (entry.key.suffix.equals(FINISH_DATA_SUFFIX)) {
-            retrieveStartFinishData(appAttemptId, entry, startFinshDataMap,
-              false);
+          ContainerId containerId =
+              ConverterUtils.toContainerId(entry.key.id);
+          if (containerId.getApplicationAttemptId().equals(appAttemptId)) {
+            ContainerHistoryData historyData =
+                historyDataMap.get(containerId);
+            if (historyData == null) {
+              historyData = ContainerHistoryData.newInstance(
+                  containerId, null, null, null, Long.MIN_VALUE,
+                  Long.MAX_VALUE, null, Integer.MAX_VALUE, null);
+              historyDataMap.put(containerId, historyData);
+            }
+            if (entry.key.suffix.equals(START_DATA_SUFFIX)) {
+              mergeContainerHistoryData(historyData,
+                  parseContainerStartData(entry.value));
+            } else if (entry.key.suffix.equals(FINISH_DATA_SUFFIX)) {
+              mergeContainerHistoryData(historyData,
+                  parseContainerFinishData(entry.value));
+            }
           }
         }
       }
@@ -416,41 +403,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
     } finally {
       hfReader.close();
     }
-    for (Map.Entry<ContainerId, StartFinishDataPair<ContainerStartData, ContainerFinishData>> entry : startFinshDataMap
-      .entrySet()) {
-      ContainerHistoryData historyData =
-          ContainerHistoryData
-            .newInstance(entry.getKey(), null, null, null, Long.MIN_VALUE,
-              Long.MAX_VALUE, null, null, Integer.MAX_VALUE, null);
-      mergeContainerHistoryData(historyData, entry.getValue().startData);
-      mergeContainerHistoryData(historyData, entry.getValue().finishData);
-      historyDataMap.put(entry.getKey(), historyData);
-    }
     return historyDataMap;
-  }
-
-  private
-      void
-      retrieveStartFinishData(
-          ApplicationAttemptId appAttemptId,
-          HistoryFileReader.Entry entry,
-          Map<ContainerId, StartFinishDataPair<ContainerStartData, ContainerFinishData>> startFinshDataMap,
-          boolean start) throws IOException {
-    ContainerId containerId = ConverterUtils.toContainerId(entry.key.id);
-    if (containerId.getApplicationAttemptId().equals(appAttemptId)) {
-      StartFinishDataPair<ContainerStartData, ContainerFinishData> pair =
-          startFinshDataMap.get(containerId);
-      if (pair == null) {
-        pair =
-            new StartFinishDataPair<ContainerStartData, ContainerFinishData>();
-        startFinshDataMap.put(containerId, pair);
-      }
-      if (start) {
-        pair.startData = parseContainerStartData(entry.value);
-      } else {
-        pair.finishData = parseContainerFinishData(entry.value);
-      }
-    }
   }
 
   @Override
@@ -467,7 +420,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
             + appStart.getApplicationId());
       } catch (IOException e) {
         LOG.error("Error when openning history file of application "
-            + appStart.getApplicationId());
+            + appStart.getApplicationId(), e);
         throw e;
       }
       outstandingWriters.put(appStart.getApplicationId(), hfWriter);
@@ -484,7 +437,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + appStart.getApplicationId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing start information of application "
-          + appStart.getApplicationId());
+          + appStart.getApplicationId(), e);
       throw e;
     }
   }
@@ -503,7 +456,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + appFinish.getApplicationId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing finish information of application "
-          + appFinish.getApplicationId());
+          + appFinish.getApplicationId(), e);
       throw e;
     } finally {
       hfWriter.close();
@@ -527,7 +480,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + appAttemptStart.getApplicationAttemptId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing start information of application attempt "
-          + appAttemptStart.getApplicationAttemptId());
+          + appAttemptStart.getApplicationAttemptId(), e);
       throw e;
     }
   }
@@ -548,7 +501,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + appAttemptFinish.getApplicationAttemptId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing finish information of application attempt "
-          + appAttemptFinish.getApplicationAttemptId());
+          + appAttemptFinish.getApplicationAttemptId(), e);
       throw e;
     }
   }
@@ -568,7 +521,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + containerStart.getContainerId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing start information of container "
-          + containerStart.getContainerId());
+          + containerStart.getContainerId(), e);
       throw e;
     }
   }
@@ -588,7 +541,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
           + containerFinish.getContainerId() + " is written");
     } catch (IOException e) {
       LOG.error("Error when writing finish information of container "
-          + containerFinish.getContainerId());
+          + containerFinish.getContainerId(), e);
     }
   }
 
@@ -679,7 +632,6 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       ContainerHistoryData historyData, ContainerFinishData finishData) {
     historyData.setFinishTime(finishData.getFinishTime());
     historyData.setDiagnosticsInfo(finishData.getDiagnosticsInfo());
-    historyData.setLogURL(finishData.getLogURL());
     historyData.setContainerExitStatus(finishData.getContainerExitStatus());
     historyData.setContainerState(finishData.getContainerState());
   }
@@ -724,9 +676,10 @@ public class FileSystemApplicationHistoryStore extends AbstractService
 
     private TFile.Reader reader;
     private TFile.Reader.Scanner scanner;
+    FSDataInputStream fsdis;
 
     public HistoryFileReader(Path historyFile) throws IOException {
-      FSDataInputStream fsdis = fs.open(historyFile);
+      fsdis = fs.open(historyFile);
       reader =
           new TFile.Reader(fsdis, fs.getFileStatus(historyFile).getLen(),
             getConfig());
@@ -755,7 +708,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
     }
 
     public void close() {
-      IOUtils.cleanup(LOG, scanner, reader);
+      IOUtils.cleanup(LOG, scanner, reader, fsdis);
     }
 
   }
@@ -774,8 +727,8 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       fs.setPermission(historyFile, HISTORY_FILE_UMASK);
       writer =
           new TFile.Writer(fsdos, MIN_BLOCK_SIZE, getConfig().get(
-            YarnConfiguration.FS_HISTORY_STORE_COMPRESSION_TYPE,
-            YarnConfiguration.DEFAULT_FS_HISTORY_STORE_COMPRESSION_TYPE), null,
+            YarnConfiguration.FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE,
+            YarnConfiguration.DEFAULT_FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE), null,
             getConfig());
     }
 
@@ -828,14 +781,5 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       id = in.readUTF();
       suffix = in.readUTF();
     }
-
   }
-
-  private static class StartFinishDataPair<S, F> {
-
-    private S startData;
-    private F finishData;
-
-  }
-
 }

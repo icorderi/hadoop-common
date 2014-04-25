@@ -17,17 +17,13 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
-import java.io.DataOutput;
-import java.io.IOException;
-import java.util.List;
-
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.INodeAttributes;
 import org.apache.hadoop.hdfs.server.namenode.Quota;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat.ReferenceMap;
 
-import com.google.common.base.Preconditions;
+import java.util.List;
 
 /**
  * The difference of an inode between in two snapshots.
@@ -90,7 +86,6 @@ abstract class AbstractINodeDiff<N extends INode,
     return posteriorDiff;
   }
 
-  /** @return the posterior diff. */
   final void setPosterior(D posterior) {
     posteriorDiff = posterior;
   }
@@ -133,11 +128,4 @@ abstract class AbstractINodeDiff<N extends INode,
     return getClass().getSimpleName() + ": " + this.getSnapshotId() + " (post="
         + (posteriorDiff == null? null: posteriorDiff.getSnapshotId()) + ")";
   }
-
-  void writeSnapshot(DataOutput out) throws IOException {
-    out.writeInt(snapshotId);
-  }
-  
-  abstract void write(DataOutput out, ReferenceMap referenceMap
-      ) throws IOException;
 }

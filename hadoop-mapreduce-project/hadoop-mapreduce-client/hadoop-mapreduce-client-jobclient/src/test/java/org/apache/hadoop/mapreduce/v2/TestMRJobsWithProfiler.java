@@ -24,7 +24,7 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -104,7 +104,7 @@ public class TestMRJobsWithProfiler {
   }
 
 
-  @Test (timeout = 120000)
+  @Test (timeout = 150000)
   public void testProfiler() throws IOException, InterruptedException,
       ClassNotFoundException {
     if (!(new File(MiniMRYarnCluster.APPJAR)).exists()) {

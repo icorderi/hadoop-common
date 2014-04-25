@@ -69,6 +69,7 @@
       <item name="High Availability With QJM" href="hadoop-project-dist/hadoop-hdfs/HDFSHighAvailabilityWithQJM.html"/>
       <item name="High Availability With NFS" href="hadoop-project-dist/hadoop-hdfs/HDFSHighAvailabilityWithNFS.html"/>
       <item name="Federation" href="hadoop-project-dist/hadoop-hdfs/Federation.html"/>
+      <item name="ViewFs Guide" href="hadoop-project-dist/hadoop-hdfs/ViewFs.html"/>
       <item name="HDFS Snapshots" href="hadoop-project-dist/hadoop-hdfs/HdfsSnapshots.html"/>
       <item name="HDFS Architecture" href="hadoop-project-dist/hadoop-hdfs/HdfsDesign.html"/>
       <item name="Edits Viewer" href="hadoop-project-dist/hadoop-hdfs/HdfsEditsViewer.html"/>
@@ -83,6 +84,7 @@
           href="hadoop-project-dist/hadoop-hdfs/ShortCircuitLocalReads.html"/>
       <item name="Centralized Cache Management" href="hadoop-project-dist/hadoop-hdfs/CentralizedCacheManagement.html"/>
       <item name="HDFS NFS Gateway" href="hadoop-project-dist/hadoop-hdfs/HdfsNfsGateway.html"/>
+      <item name="HDFS Rolling Upgrade" href="hadoop-project-dist/hadoop-hdfs/HdfsRollingUpgrade.html"/>
     </menu>
 
     <menu name="MapReduce" inherit="top">
@@ -94,10 +96,12 @@
 
     <menu name="YARN" inherit="top">
       <item name="YARN Architecture" href="hadoop-yarn/hadoop-yarn-site/YARN.html"/>
-      <item name="Writing YARN Applications" href="hadoop-yarn/hadoop-yarn-site/WritingYarnApplications.html"/>
       <item name="Capacity Scheduler" href="hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html"/>
       <item name="Fair Scheduler" href="hadoop-yarn/hadoop-yarn-site/FairScheduler.html"/>
+      <item name="ResourceManager Restart" href="hadoop-yarn/hadoop-yarn-site/ResourceManagerRestart.html"/>
       <item name="Web Application Proxy" href="hadoop-yarn/hadoop-yarn-site/WebApplicationProxy.html"/>
+      <item name="YARN Timeline Server" href="hadoop-yarn/hadoop-yarn-site/TimelineServer.html"/>
+      <item name="Writing YARN Applications" href="hadoop-yarn/hadoop-yarn-site/WritingYarnApplications.html"/>
       <item name="YARN Commands" href="hadoop-yarn/hadoop-yarn-site/YarnCommands.html"/>
       <item name="Scheduler Load Simulator" href="hadoop-sls/SchedulerLoadSimulator.html"/>
     </menu>

@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -43,6 +44,8 @@ import org.apache.hadoop.hdfs.BlockReaderFactory;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.RemotePeerFactory;
+import org.apache.hadoop.hdfs.net.Peer;
 import org.apache.hadoop.hdfs.net.TcpPeerServer;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
@@ -54,6 +57,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementStatus;
+import org.apache.hadoop.hdfs.server.blockmanagement.NumberReplicas;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.net.NetUtils;
@@ -138,13 +142,13 @@ public class NamenodeFsck {
   // We return back N files that are corrupt; the list of files returned is
   // ordered by block id; to allow continuation support, pass in the last block
   // # from previous call
-  private String[] currentCookie = new String[] { null };
+  private final String[] currentCookie = new String[] { null };
 
   private final Configuration conf;
   private final PrintWriter out;
   private List<String> snapshottableDirs = null;
 
-  private BlockPlacementPolicy bpPolicy;
+  private final BlockPlacementPolicy bpPolicy;
 
   /**
    * Filesystem checker.
@@ -155,7 +159,6 @@ public class NamenodeFsck {
    * @param totalDatanodes number of live datanodes
    * @param minReplication minimum replication
    * @param remoteAddress source address of the fsck request
-   * @throws IOException
    */
   NamenodeFsck(Configuration conf, NameNode namenode,
       NetworkTopology networktopology, 
@@ -374,11 +377,13 @@ public class NamenodeFsck {
       boolean isCorrupt = lBlk.isCorrupt();
       String blkName = block.toString();
       DatanodeInfo[] locs = lBlk.getLocations();
-      res.totalReplicas += locs.length;
+      NumberReplicas numberReplicas = namenode.getNamesystem().getBlockManager().countNodes(block.getLocalBlock());
+      int liveReplicas = numberReplicas.liveReplicas();
+      res.totalReplicas += liveReplicas;
       short targetFileReplication = file.getReplication();
       res.numExpectedReplicas += targetFileReplication;
-      if (locs.length > targetFileReplication) {
-        res.excessiveReplicas += (locs.length - targetFileReplication);
+      if (liveReplicas > targetFileReplication) {
+        res.excessiveReplicas += (liveReplicas - targetFileReplication);
         res.numOverReplicatedBlocks += 1;
       }
       // Check if block is Corrupt
@@ -388,10 +393,10 @@ public class NamenodeFsck {
         out.print("\n" + path + ": CORRUPT blockpool " + block.getBlockPoolId() + 
             " block " + block.getBlockName()+"\n");
       }
-      if (locs.length >= minReplication)
+      if (liveReplicas >= minReplication)
         res.numMinReplicatedBlocks++;
-      if (locs.length < targetFileReplication && locs.length > 0) {
-        res.missingReplicas += (targetFileReplication - locs.length);
+      if (liveReplicas < targetFileReplication && liveReplicas > 0) {
+        res.missingReplicas += (targetFileReplication - liveReplicas);
         res.numUnderReplicatedBlocks += 1;
         underReplicatedPerFile++;
         if (!showFiles) {
@@ -400,7 +405,7 @@ public class NamenodeFsck {
         out.println(" Under replicated " + block +
                     ". Target Replicas is " +
                     targetFileReplication + " but found " +
-                    locs.length + " replica(s).");
+                    liveReplicas + " replica(s).");
       }
       // verify block placement policy
       BlockPlacementStatus blockPlacementStatus = bpPolicy
@@ -417,13 +422,13 @@ public class NamenodeFsck {
                     block + ". " + blockPlacementStatus.getErrorDescription());
       }
       report.append(i + ". " + blkName + " len=" + block.getNumBytes());
-      if (locs.length == 0) {
+      if (liveReplicas == 0) {
         report.append(" MISSING!");
         res.addMissing(block.toString(), block.getNumBytes());
         missing++;
         missize += block.getNumBytes();
       } else {
-        report.append(" repl=" + locs.length);
+        report.append(" repl=" + liveReplicas);
         if (showLocations || showRacks) {
           StringBuilder sb = new StringBuilder("[");
           for (int j = 0; j < locs.length; j++) {
@@ -569,11 +574,10 @@ public class NamenodeFsck {
     int failures = 0;
     InetSocketAddress targetAddr = null;
     TreeSet<DatanodeInfo> deadNodes = new TreeSet<DatanodeInfo>();
-    Socket s = null;
     BlockReader blockReader = null; 
     ExtendedBlock block = lblock.getBlock(); 
 
-    while (s == null) {
+    while (blockReader == null) {
       DatanodeInfo chosenNode;
       
       try {
@@ -593,33 +597,46 @@ public class NamenodeFsck {
         continue;
       }
       try {
-        s = NetUtils.getDefaultSocketFactory(conf).createSocket();
-        s.connect(targetAddr, HdfsServerConstants.READ_TIMEOUT);
-        s.setSoTimeout(HdfsServerConstants.READ_TIMEOUT);
-        
-        String file = BlockReaderFactory.getFileName(targetAddr, block.getBlockPoolId(),
-            block.getBlockId());
-        blockReader = BlockReaderFactory.newBlockReader(dfs.getConf(),
-            file, block, lblock.getBlockToken(), 0, -1, true, "fsck",
-            TcpPeerServer.peerFromSocketAndKey(s, namenode.getRpcServer().
-                getDataEncryptionKey()), chosenNode, null, null, null, 
-                false, CachingStrategy.newDropBehind());
-        
+        String file = BlockReaderFactory.getFileName(targetAddr,
+            block.getBlockPoolId(), block.getBlockId());
+        blockReader = new BlockReaderFactory(dfs.getConf()).
+            setFileName(file).
+            setBlock(block).
+            setBlockToken(lblock.getBlockToken()).
+            setStartOffset(0).
+            setLength(-1).
+            setVerifyChecksum(true).
+            setClientName("fsck").
+            setDatanodeInfo(chosenNode).
+            setInetSocketAddress(targetAddr).
+            setCachingStrategy(CachingStrategy.newDropBehind()).
+            setClientCacheContext(dfs.getClientContext()).
+            setConfiguration(namenode.conf).
+            setRemotePeerFactory(new RemotePeerFactory() {
+              @Override
+              public Peer newConnectedPeer(InetSocketAddress addr)
+                  throws IOException {
+                Peer peer = null;
+                Socket s = NetUtils.getDefaultSocketFactory(conf).createSocket();
+                try {
+                  s.connect(addr, HdfsServerConstants.READ_TIMEOUT);
+                  s.setSoTimeout(HdfsServerConstants.READ_TIMEOUT);
+                  peer = TcpPeerServer.peerFromSocketAndKey(s, namenode.getRpcServer().
+                        getDataEncryptionKey());
+                } finally {
+                  if (peer == null) {
+                    IOUtils.closeQuietly(s);
+                  }
+                }
+                return peer;
+              }
+            }).
+            build();
       }  catch (IOException ex) {
         // Put chosen node into dead list, continue
         LOG.info("Failed to connect to " + targetAddr + ":" + ex);
         deadNodes.add(chosenNode);
-        if (s != null) {
-          try {
-            s.close();
-          } catch (IOException iex) {
-          }
-        }
-        s = null;
       }
-    }
-    if (blockReader == null) {
-      throw new Exception("Could not open data stream for " + lblock.getBlock());
     }
     byte[] buf = new byte[1024];
     int cnt = 0;
@@ -638,10 +655,11 @@ public class NamenodeFsck {
       LOG.error("Error reading block", e);
       success = false;
     } finally {
-      try {s.close(); } catch (Exception e1) {}
+      blockReader.close();
     }
-    if (!success)
+    if (!success) {
       throw new Exception("Could not copy block data for " + lblock.getBlock());
+    }
   }
       
   /*
@@ -695,7 +713,7 @@ public class NamenodeFsck {
    */
   @VisibleForTesting
   static class Result {
-    List<String> missingIds = new ArrayList<String>();
+    final List<String> missingIds = new ArrayList<String>();
     long missingSize = 0L;
     long corruptFiles = 0L;
     long corruptBlocks = 0L;

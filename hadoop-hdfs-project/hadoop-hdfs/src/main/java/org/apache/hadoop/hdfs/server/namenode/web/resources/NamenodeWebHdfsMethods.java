@@ -53,6 +53,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Options;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
@@ -71,6 +72,7 @@ import org.apache.hadoop.hdfs.web.ParamFilter;
 import org.apache.hadoop.hdfs.web.SWebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
+import org.apache.hadoop.hdfs.web.resources.AclPermissionParam;
 import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
 import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
 import org.apache.hadoop.hdfs.web.resources.ConcatSourcesParam;
@@ -84,7 +86,7 @@ import org.apache.hadoop.hdfs.web.resources.GroupParam;
 import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
 import org.apache.hadoop.hdfs.web.resources.LengthParam;
 import org.apache.hadoop.hdfs.web.resources.ModificationTimeParam;
-import org.apache.hadoop.hdfs.web.resources.NamenodeRpcAddressParam;
+import org.apache.hadoop.hdfs.web.resources.NamenodeAddressParam;
 import org.apache.hadoop.hdfs.web.resources.OffsetParam;
 import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
 import org.apache.hadoop.hdfs.web.resources.OwnerParam;
@@ -101,12 +103,14 @@ import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
 import org.apache.hadoop.hdfs.web.resources.UserParam;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.net.NetworkTopology.InvalidTopologyException;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Charsets;
 import com.sun.jersey.spi.container.ResourceFilters;
 
@@ -160,9 +164,19 @@ public class NamenodeWebHdfsMethods {
     response.setContentType(null);
   }
 
+  private static NamenodeProtocols getRPCServer(NameNode namenode)
+      throws IOException {
+     final NamenodeProtocols np = namenode.getRpcServer();
+     if (np == null) {
+       throw new IOException("Namenode is in startup mode");
+     }
+     return np;
+  }
+
+  @VisibleForTesting
   static DatanodeInfo chooseDatanode(final NameNode namenode,
       final String path, final HttpOpParam.Op op, final long openOffset,
-      final long blocksize, final Configuration conf) throws IOException {
+      final long blocksize) throws IOException {
     final BlockManager bm = namenode.getNamesystem().getBlockManager();
 
     if (op == PutOpParam.Op.CREATE) {
@@ -183,7 +197,7 @@ public class NamenodeWebHdfsMethods {
         || op == GetOpParam.Op.GETFILECHECKSUM
         || op == PostOpParam.Op.APPEND) {
       //choose a datanode containing a replica 
-      final NamenodeProtocols np = namenode.getRpcServer();
+      final NamenodeProtocols np = getRPCServer(namenode);
       final HdfsFileStatus status = np.getFileInfo(path);
       if (status == null) {
         throw new FileNotFoundException("File " + path + " not found.");
@@ -201,7 +215,7 @@ public class NamenodeWebHdfsMethods {
         final LocatedBlocks locations = np.getBlockLocations(path, offset, 1);
         final int count = locations.locatedBlockCount();
         if (count > 0) {
-          return JspHelper.bestNode(locations.get(0).getLocations(), false, conf);
+          return bestNode(locations.get(0).getLocations());
         }
       }
     } 
@@ -210,13 +224,26 @@ public class NamenodeWebHdfsMethods {
         ).chooseRandom(NodeBase.ROOT);
   }
 
+  /**
+   * Choose the datanode to redirect the request. Note that the nodes have been
+   * sorted based on availability and network distances, thus it is sufficient
+   * to return the first element of the node here.
+   */
+  private static DatanodeInfo bestNode(DatanodeInfo[] nodes) throws IOException {
+    if (nodes.length == 0 || nodes[0].isDecommissioned()) {
+      throw new IOException("No active nodes contain this block");
+    }
+    return nodes[0];
+  }
+
   private Token<? extends TokenIdentifier> generateDelegationToken(
       final NameNode namenode, final UserGroupInformation ugi,
       final String renewer) throws IOException {
     final Credentials c = DelegationTokenSecretManager.createCredentials(
         namenode, ugi, renewer != null? renewer: ugi.getShortUserName());
     final Token<? extends TokenIdentifier> t = c.getAllTokens().iterator().next();
-    Text kind = request.getScheme().equals("http") ? WebHdfsFileSystem.TOKEN_KIND : SWebHdfsFileSystem.TOKEN_KIND;
+    Text kind = request.getScheme().equals("http") ? WebHdfsFileSystem.TOKEN_KIND
+        : SWebHdfsFileSystem.TOKEN_KIND;
     t.setKind(kind);
     return t;
   }
@@ -227,9 +254,12 @@ public class NamenodeWebHdfsMethods {
       final String path, final HttpOpParam.Op op, final long openOffset,
       final long blocksize,
       final Param<?, ?>... parameters) throws URISyntaxException, IOException {
-    final Configuration conf = (Configuration)context.getAttribute(JspHelper.CURRENT_CONF);
-    final DatanodeInfo dn = chooseDatanode(namenode, path, op, openOffset,
-        blocksize, conf);
+    final DatanodeInfo dn;
+    try {
+      dn = chooseDatanode(namenode, path, op, openOffset, blocksize);
+    } catch (InvalidTopologyException ite) {
+      throw new IOException("Failed to find datanode, suggest to check cluster health.", ite);
+    }
 
     final String delegationQuery;
     if (!UserGroupInformation.isSecurityEnabled()) {
@@ -245,7 +275,7 @@ public class NamenodeWebHdfsMethods {
       delegationQuery = "&" + new DelegationParam(t.encodeToUrlString());
     }
     final String query = op.toQueryString() + delegationQuery
-        + "&" + new NamenodeRpcAddressParam(namenode)
+        + "&" + new NamenodeAddressParam(namenode)
         + Param.toSortedString("&", parameters);
     final String uripath = WebHdfsFileSystem.PATH_PREFIX + path;
 
@@ -301,12 +331,14 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(CreateParentParam.NAME) @DefaultValue(CreateParentParam.DEFAULT)
           final CreateParentParam createParent,
       @QueryParam(TokenArgumentParam.NAME) @DefaultValue(TokenArgumentParam.DEFAULT)
-          final TokenArgumentParam delegationTokenArgument
-      ) throws IOException, InterruptedException {
+          final TokenArgumentParam delegationTokenArgument,
+      @QueryParam(AclPermissionParam.NAME) @DefaultValue(AclPermissionParam.DEFAULT) 
+          final AclPermissionParam aclPermission
+          )throws IOException, InterruptedException {
     return put(ugi, delegation, username, doAsUser, ROOT, op, destination,
         owner, group, permission, overwrite, bufferSize, replication,
         blockSize, modificationTime, accessTime, renameOptions, createParent,
-        delegationTokenArgument);
+        delegationTokenArgument,aclPermission);
   }
 
   /** Handle HTTP PUT request. */
@@ -350,12 +382,14 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(CreateParentParam.NAME) @DefaultValue(CreateParentParam.DEFAULT)
           final CreateParentParam createParent,
       @QueryParam(TokenArgumentParam.NAME) @DefaultValue(TokenArgumentParam.DEFAULT)
-          final TokenArgumentParam delegationTokenArgument
+          final TokenArgumentParam delegationTokenArgument,
+      @QueryParam(AclPermissionParam.NAME) @DefaultValue(AclPermissionParam.DEFAULT) 
+          final AclPermissionParam aclPermission
       ) throws IOException, InterruptedException {
 
     init(ugi, delegation, username, doAsUser, path, op, destination, owner,
         group, permission, overwrite, bufferSize, replication, blockSize,
-        modificationTime, accessTime, renameOptions, delegationTokenArgument);
+        modificationTime, accessTime, renameOptions, delegationTokenArgument,aclPermission);
 
     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
       @Override
@@ -366,7 +400,7 @@ public class NamenodeWebHdfsMethods {
               path.getAbsolutePath(), op, destination, owner, group,
               permission, overwrite, bufferSize, replication, blockSize,
               modificationTime, accessTime, renameOptions, createParent,
-              delegationTokenArgument);
+              delegationTokenArgument,aclPermission);
         } finally {
           REMOTE_ADDRESS.set(null);
         }
@@ -393,12 +427,13 @@ public class NamenodeWebHdfsMethods {
       final AccessTimeParam accessTime,
       final RenameOptionSetParam renameOptions,
       final CreateParentParam createParent,
-      final TokenArgumentParam delegationTokenArgument
+      final TokenArgumentParam delegationTokenArgument,
+      final AclPermissionParam aclPermission
       ) throws IOException, URISyntaxException {
 
     final Configuration conf = (Configuration)context.getAttribute(JspHelper.CURRENT_CONF);
     final NameNode namenode = (NameNode)context.getAttribute("name.node");
-    final NamenodeProtocols np = namenode.getRpcServer();
+    final NamenodeProtocols np = getRPCServer(namenode);
 
     switch(op.getValue()) {
     case CREATE:
@@ -471,6 +506,26 @@ public class NamenodeWebHdfsMethods {
       final Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>();
       token.decodeFromUrlString(delegationTokenArgument.getValue());
       np.cancelDelegationToken(token);
+      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+    }
+    case MODIFYACLENTRIES: {
+      np.modifyAclEntries(fullpath, aclPermission.getAclPermission(true));
+      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+    }
+    case REMOVEACLENTRIES: {
+      np.removeAclEntries(fullpath, aclPermission.getAclPermission(false));
+      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+    }
+    case REMOVEDEFAULTACL: {
+      np.removeDefaultAcl(fullpath);
+      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+    }
+    case REMOVEACL: {
+      np.removeAcl(fullpath);
+      return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
+    }
+    case SETACL: {
+      np.setAcl(fullpath, aclPermission.getAclPermission(true));
       return Response.ok().type(MediaType.APPLICATION_OCTET_STREAM).build();
     }
     default:
@@ -560,7 +615,7 @@ public class NamenodeWebHdfsMethods {
     }
     case CONCAT:
     {
-      namenode.getRpcServer().concat(fullpath, concatSrcs.getAbsolutePaths());
+      getRPCServer(namenode).concat(fullpath, concatSrcs.getAbsolutePaths());
       return Response.ok().build();
     }
     default:
@@ -650,7 +705,7 @@ public class NamenodeWebHdfsMethods {
       final BufferSizeParam bufferSize
       ) throws IOException, URISyntaxException {
     final NameNode namenode = (NameNode)context.getAttribute("name.node");
-    final NamenodeProtocols np = namenode.getRpcServer();
+    final NamenodeProtocols np = getRPCServer(namenode);
 
     switch(op.getValue()) {
     case OPEN:
@@ -711,6 +766,15 @@ public class NamenodeWebHdfsMethods {
       final String js = JsonUtil.toJsonString(
           org.apache.hadoop.fs.Path.class.getSimpleName(),
           WebHdfsFileSystem.getHomeDirectoryString(ugi));
+      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
+    }
+    case GETACLSTATUS: {
+      AclStatus status = np.getAclStatus(fullpath);
+      if (status == null) {
+        throw new FileNotFoundException("File does not exist: " + fullpath);
+      }
+
+      final String js = JsonUtil.toJsonString(status);
       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
     }
     default:
@@ -850,7 +914,7 @@ public class NamenodeWebHdfsMethods {
     switch(op.getValue()) {
     case DELETE:
     {
-      final boolean b = namenode.getRpcServer().delete(fullpath, recursive.getValue());
+      final boolean b = getRPCServer(namenode).delete(fullpath, recursive.getValue());
       final String js = JsonUtil.toJsonString("boolean", b);
       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
     }

@@ -39,6 +39,8 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.RefreshAuthorizationPolicyProtocol;
 import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolClientSideTranslatorPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolClientSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolClientSideTranslatorPB;
+import org.apache.hadoop.ipc.RefreshCallQueueProtocol;
 import org.apache.hadoop.tools.GetUserMappingsProtocol;
 import org.apache.hadoop.tools.protocolPB.GetUserMappingsProtocolClientSideTranslatorPB;
 import org.junit.AfterClass;
@@ -51,7 +53,7 @@ import org.junit.Test;
  */
 public class TestIsMethodSupported {
   private static MiniDFSCluster cluster = null;
-  private static HdfsConfiguration conf = new HdfsConfiguration();
+  private static final HdfsConfiguration conf = new HdfsConfiguration();
   private static InetSocketAddress nnAddress = null;
   private static InetSocketAddress dnAddress = null;
   
@@ -168,5 +170,16 @@ public class TestIsMethodSupported {
             UserGroupInformation.getCurrentUser(), true).getProxy();
     assertTrue(
         translator.isMethodSupported("refreshUserToGroupsMappings"));
+  }
+
+  @Test
+  public void testRefreshCallQueueProtocol() throws IOException {
+    RefreshCallQueueProtocolClientSideTranslatorPB translator =
+        (RefreshCallQueueProtocolClientSideTranslatorPB)
+        NameNodeProxies.createNonHAProxy(conf, nnAddress,
+            RefreshCallQueueProtocol.class,
+            UserGroupInformation.getCurrentUser(), true).getProxy();
+    assertTrue(
+        translator.isMethodSupported("refreshCallQueue"));
   }
 }

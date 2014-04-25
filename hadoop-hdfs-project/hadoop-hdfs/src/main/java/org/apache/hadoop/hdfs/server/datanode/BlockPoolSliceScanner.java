@@ -361,7 +361,7 @@ class BlockPoolSliceScanner {
      * This simple text and easily extendable and easily parseable with a
      * regex.
      */
-    private static Pattern entryPattern = 
+    private static final Pattern entryPattern =
       Pattern.compile("\\G\\s*([^=\\p{Space}]+)=\"(.*?)\"\\s*");
     
     static String toString(long verificationTime, long genStamp, long blockId,
@@ -382,11 +382,11 @@ class BlockPoolSliceScanner {
         
         try {
           if (name.equals("id")) {
-            entry.blockId = Long.valueOf(value);
+            entry.blockId = Long.parseLong(value);
           } else if (name.equals("time")) {
-            entry.verificationTime = Long.valueOf(value);
+            entry.verificationTime = Long.parseLong(value);
           } else if (name.equals("genstamp")) {
-            entry.genStamp = Long.valueOf(value);
+            entry.genStamp = Long.parseLong(value);
           }
         } catch(NumberFormatException nfe) {
           LOG.warn("Cannot parse line: " + line, nfe);

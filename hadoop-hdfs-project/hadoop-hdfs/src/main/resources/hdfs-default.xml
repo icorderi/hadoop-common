@@ -55,11 +55,11 @@
   <name>dfs.namenode.rpc-bind-host</name>
   <value></value>
   <description>
-    The actual address the server will bind to. If this optional address is
-    set, the RPC server will bind to this address and the port specified in
-    dfs.namenode.rpc-address for the RPC server. It can also be specified
-    per name node or name service for HA/Federation. This is most useful for
-    making name node listen to all interfaces by setting to 0.0.0.0.
+    The actual address the RPC server will bind to. If this optional address is
+    set, it overrides only the hostname portion of dfs.namenode.rpc-address.
+    It can also be specified per name node or name service for HA/Federation.
+    This is useful for making the name node listen on all interfaces by
+    setting it to 0.0.0.0.
   </description>
 </property>
 
@@ -80,11 +80,11 @@
   <name>dfs.namenode.servicerpc-bind-host</name>
   <value></value>
   <description>
-    The actual address the server will bind to. If this optional address is
-    set, the service RPC server will bind to this address and the port 
-    specified in dfs.namenode.servicerpc-address. It can also be specified
-    per name node or name service for HA/Federation. This is most useful for
-    making name node listen to all interfaces by setting to 0.0.0.0.
+    The actual address the service RPC server will bind to. If this optional address is
+    set, it overrides only the hostname portion of dfs.namenode.servicerpc-address.
+    It can also be specified per name node or name service for HA/Federation.
+    This is useful for making the name node listen on all interfaces by
+    setting it to 0.0.0.0.
   </description>
 </property>
 
@@ -93,6 +93,14 @@
   <value>0.0.0.0:50090</value>
   <description>
     The secondary namenode http server address and port.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.secondary.https-address</name>
+  <value>0.0.0.0:50091</value>
+  <description>
+    The secondary namenode HTTPS server address and port.
   </description>
 </property>
 
@@ -135,6 +143,18 @@
 </property>
 
 <property>
+  <name>dfs.namenode.http-bind-host</name>
+  <value></value>
+  <description>
+    The actual adress the HTTP server will bind to. If this optional address
+    is set, it overrides only the hostname portion of dfs.namenode.http-address.
+    It can also be specified per name node or name service for HA/Federation.
+    This is useful for making the name node HTTP server listen on all
+    interfaces by setting it to 0.0.0.0.
+  </description>
+</property>
+
+<property>
   <name>dfs.https.enable</name>
   <value>false</value>
   <description>
@@ -162,6 +182,16 @@
 </property>
 
 <property>
+  <name>dfs.client.cached.conn.retry</name>
+  <value>3</value>
+  <description>The number of times the HDFS client will pull a socket from the
+   cache.  Once this number is exceeded, the client will try to create a new
+   socket.
+  </description>
+</property>
+
+
+<property>
   <name>dfs.https.server.keystore.resource</name>
   <value>ssl-server.xml</value>
   <description>Resource file from which ssl server keystore
@@ -187,6 +217,18 @@
   <name>dfs.namenode.https-address</name>
   <value>0.0.0.0:50470</value>
   <description>The namenode secure http server address and port.</description>
+</property>
+
+<property>
+  <name>dfs.namenode.https-bind-host</name>
+  <value></value>
+  <description>
+    The actual adress the HTTPS server will bind to. If this optional address
+    is set, it overrides only the hostname portion of dfs.namenode.https-address.
+    It can also be specified per name node or name service for HA/Federation.
+    This is useful for making the name node HTTPS server listen on all
+    interfaces by setting it to 0.0.0.0.
+  </description>
 </property>
 
  <property>
@@ -263,14 +305,14 @@
 
 <property>
   <name>dfs.namenode.fs-limits.max-component-length</name>
-  <value>0</value>
-  <description>Defines the maximum number of characters in each component
-      of a path.  A value of 0 will disable the check.</description>
+  <value>255</value>
+  <description>Defines the maximum number of bytes in UTF-8 encoding in each
+      component of a path.  A value of 0 will disable the check.</description>
 </property>
 
 <property>
   <name>dfs.namenode.fs-limits.max-directory-items</name>
-  <value>0</value>
+  <value>1048576</value>
   <description>Defines the maximum number of items that a directory may
       contain.  A value of 0 will disable the check.</description>
 </property>
@@ -344,6 +386,16 @@
    </description>
 </property>
 -->
+
+<property>
+  <name>dfs.namenode.acls.enabled</name>
+  <value>false</value>
+  <description>
+    Set to true to enable support for HDFS ACLs (Access Control Lists).  By
+    default, ACLs are disabled.  When ACLs are disabled, the NameNode rejects
+    all RPCs related to setting or getting ACLs.
+  </description>
+</property>
 
 <property>
   <name>dfs.block.access.token.enable</name>
@@ -830,15 +882,13 @@
 
 <property>
   <name>dfs.image.transfer.timeout</name>
-  <value>600000</value>
+  <value>60000</value>
   <description>
-        Timeout for image transfer in milliseconds. This timeout and the related
+        Socket timeout for image transfer in milliseconds. This timeout and the related
         dfs.image.transfer.bandwidthPerSec parameter should be configured such
-        that normal image transfer can complete within the timeout.
+        that normal image transfer can complete successfully.
         This timeout prevents client hangs when the sender fails during
-        image transfer, which is particularly important during checkpointing.
-        Note that this timeout applies to the entirety of image transfer, and
-        is not a socket timeout.
+        image transfer. This is socket timeout during image tranfer.
   </description>
 </property>
 
@@ -852,6 +902,16 @@
         dfs.image.transfer.timeout should be set such that normal image
         transfers can complete successfully.
         A default value of 0 indicates that throttling is disabled. 
+  </description>
+</property>
+
+<property>
+  <name>dfs.image.transfer.chunksize</name>
+  <value>65536</value>
+  <description>
+        Chunksize in bytes to upload the checkpoint.
+        Chunked streaming is used to avoid internal buffering of contents
+        of image file of huge size.
   </description>
 </property>
 
@@ -1003,6 +1063,18 @@
 </property>
 
 <property>
+  <name>dfs.client.datanode-restart.timeout</name>
+  <value>30</value>
+  <description>
+    Expert only. The time to wait, in seconds, from reception of an
+    datanode shutdown notification for quick restart, until declaring
+    the datanode dead and invoking the normal recovery mechanisms.
+    The notification is sent by a datanode when it is being shutdown
+    using the shutdownDatanode admin command with the upgrade option.
+  </description>
+</property>
+
+<property>
   <name>dfs.nameservices</name>
   <value></value>
   <description>
@@ -1110,6 +1182,27 @@
 </property>
 
 <property>
+  <name>dfs.datanode.shared.file.descriptor.paths</name>
+  <value>/dev/shm,/tmp</value>
+  <description>
+    A comma-separated list of paths to use when creating file descriptors that
+    will be shared between the DataNode and the DFSClient.  Typically we use
+    /dev/shm, so that the file descriptors will not be written to disk.
+    Systems that don't have /dev/shm will fall back to /tmp by default.
+  </description>
+</property>
+
+<property>
+  <name>dfs.short.circuit.shared.memory.watcher.interrupt.check.ms</name>
+  <value>60000</value>
+  <description>
+    The length of time in milliseconds that the short-circuit shared memory
+    watcher will go between checking for java interruptions sent from other
+    threads.  This is provided mainly for unit tests.
+  </description>
+</property>
+
+<property>
   <name>dfs.namenode.kerberos.internal.spnego.principal</name>
   <value>${dfs.web.authentication.kerberos.principal}</value>
 </property>
@@ -1203,6 +1296,26 @@
     non-zero integer.
   </description>
 </property>
+<property>
+  <name>dfs.nfs.keytab.file</name>
+  <value></value>
+  <description>
+    *Note*: Advanced property. Change with caution.
+    This is the path to the keytab file for the hdfs-nfs gateway.
+    This is required when the cluster is kerberized.
+  </description>
+</property>
+
+<property>
+  <name>dfs.nfs.kerberos.principal</name>
+  <value></value>
+  <description>
+    *Note*: Advanced property. Change with caution.
+    This is the name of the kerberos principal. This is required when
+    the cluster is kerberized.It must be of this format:
+    nfs-gateway-user/nfs-gateway-host@kerberos-realm
+  </description>
+</property>
 
 <property>
   <name>dfs.webhdfs.enabled</name>
@@ -1249,7 +1362,8 @@
   <description>
     Whether or not actual block data that is read/written from/to HDFS should
     be encrypted on the wire. This only needs to be set on the NN and DNs,
-    clients will deduce this automatically.
+    clients will deduce this automatically. It is possible to override this setting 
+    per connection by specifying custom logic via dfs.trustedchannel.resolver.class. 
   </description>
 </property>
 
@@ -1261,6 +1375,20 @@
     the configured JCE default on the system is used (usually 3DES.) It is
     widely believed that 3DES is more cryptographically secure, but RC4 is
     substantially faster.
+  </description>
+</property>
+
+<property>
+  <name>dfs.trustedchannel.resolver.class</name>
+  <value></value>
+  <description>
+      TrustedChannelResolver is used to determine whether a channel 
+      is trusted for plain data transfer. The TrustedChannelResolver is
+      invoked on both client and server side. If the resolver indicates 
+      that the channel is trusted, then the data transfer will not be 
+      encrypted even if dfs.encrypt.data.transfer is set to true. The
+      default implementation returns false indicating that the channel 
+      is not trusted.
   </description>
 </property>
 
@@ -1281,10 +1409,10 @@
 </property>
 
 <property>
-  <name>dfs.client.file-block-storage-locations.timeout</name>
-  <value>60</value>
+  <name>dfs.client.file-block-storage-locations.timeout.millis</name>
+  <value>1000</value>
   <description>
-    Timeout (in seconds) for the parallel RPCs made in DistributedFileSystem#getFileBlockStorageLocations().
+    Timeout (in milliseconds) for the parallel RPCs made in DistributedFileSystem#getFileBlockStorageLocations().
   </description>
 </property>
 
@@ -1300,7 +1428,16 @@
   <name>dfs.journalnode.http-address</name>
   <value>0.0.0.0:8480</value>
   <description>
-    The address and port the JournalNode web UI listens on.
+    The address and port the JournalNode HTTP server listens on.
+    If the port is 0 then the server will start on a free port.
+  </description>
+</property>
+
+<property>
+  <name>dfs.journalnode.https-address</name>
+  <value>0.0.0.0:8481</value>
+  <description>
+    The address and port the JournalNode HTTPS server listens on.
     If the port is 0 then the server will start on a free port.
   </description>
 </property>
@@ -1315,17 +1452,6 @@
     logger, which uses the configured log system. Installing custom audit loggers
     may affect the performance and stability of the NameNode. Refer to the custom
     logger's documentation for more details.
-  </description>
-</property>
-
-<property>
-  <name>dfs.domain.socket.path</name>
-  <value></value>
-  <description>
-    Optional.  This is a path to a UNIX domain socket that will be used for
-    communication between the DataNode and local HDFS clients.
-    If the string "_PORT" is present in this path, it will be replaced by the
-    TCP port of the DataNode.
   </description>
 </property>
 
@@ -1463,29 +1589,57 @@
 </property>
 
 <property>
+  <name>dfs.client.mmap.enabled</name>
+  <value>true</value>
+  <description>
+    If this is set to false, the client won't attempt to perform memory-mapped reads.
+  </description>
+</property>
+
+<property>
   <name>dfs.client.mmap.cache.size</name>
-  <value>1024</value>
+  <value>256</value>
   <description>
     When zero-copy reads are used, the DFSClient keeps a cache of recently used
     memory mapped regions.  This parameter controls the maximum number of
     entries that we will keep in that cache.
 
-    If this is set to 0, we will not allow mmap.
-
     The larger this number is, the more file descriptors we will potentially
     use for memory-mapped files.  mmaped files also use virtual address space.
     You may need to increase your ulimit virtual address space limits before
     increasing the client mmap cache size.
+
+    Note that you can still do zero-copy reads when this size is set to 0.
   </description>
 </property>
 
 <property>
   <name>dfs.client.mmap.cache.timeout.ms</name>
-  <value>900000</value>
+  <value>3600000</value>
   <description>
     The minimum length of time that we will keep an mmap entry in the cache
     between uses.  If an entry is in the cache longer than this, and nobody
     uses it, it will be removed by a background thread.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.mmap.retry.timeout.ms</name>
+  <value>300000</value>
+  <description>
+    The minimum amount of time that we will wait before retrying a failed mmap
+    operation.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.short.circuit.replica.stale.threshold.ms</name>
+  <value>1800000</value>
+  <description>
+    The maximum amount of time that we will consider a short-circuit replica to
+    be valid, if there is no communication from the DataNode.  After this time
+    has elapsed, we will re-fetch the short-circuit replica even if it is in
+    the cache.
   </description>
 </property>
 
@@ -1536,19 +1690,19 @@
 
 <property>
   <name>dfs.namenode.path.based.cache.refresh.interval.ms</name>
-  <value>300000</value>
+  <value>30000</value>
   <description>
     The amount of milliseconds between subsequent path cache rescans.  Path
     cache rescans are when we calculate which blocks should be cached, and on
     what datanodes.
 
-    By default, this parameter is set to 300000, which is five minutes.
+    By default, this parameter is set to 30 seconds.
   </description>
 </property>
 
 <property>
   <name>dfs.namenode.path.based.cache.retry.interval.ms</name>
-  <value>60000</value>
+  <value>30000</value>
   <description>
     When the NameNode needs to uncache something that is cached, or cache
     something that is not cached, it must direct the DataNodes to do so by
@@ -1615,6 +1769,129 @@
   <value>^[A-Za-z_][A-Za-z0-9._-]*[$]?$</value>
   <description>
     Valid pattern for user and group names for webhdfs, it must be a valid java regex.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.context</name>
+  <value>default</value>
+  <description>
+    The name of the DFSClient context that we should use.  Clients that share
+    a context share a socket cache and short-circuit cache, among other things.
+    You should only change this if you don't want to share with another set of
+    threads.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.read.shortcircuit</name>
+  <value>false</value>
+  <description>
+    This configuration parameter turns on short-circuit local reads.
+  </description>
+</property>
+
+<property>
+  <name>dfs.domain.socket.path</name>
+  <value></value>
+  <description>
+    Optional.  This is a path to a UNIX domain socket that will be used for
+    communication between the DataNode and local HDFS clients.
+    If the string "_PORT" is present in this path, it will be replaced by the
+    TCP port of the DataNode.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.read.shortcircuit.skip.checksum</name>
+  <value>false</value>
+  <description>
+    If this configuration parameter is set,
+    short-circuit local reads will skip checksums.
+    This is normally not recommended,
+    but it may be useful for special setups.
+    You might consider using this
+    if you are doing your own checksumming outside of HDFS.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.read.shortcircuit.streams.cache.size</name>
+  <value>256</value>
+  <description>
+    The DFSClient maintains a cache of recently opened file descriptors.
+    This parameter controls the size of that cache.
+    Setting this higher will use more file descriptors,
+    but potentially provide better performance on workloads
+    involving lots of seeks.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.read.shortcircuit.streams.cache.expiry.ms</name>
+  <value>300000</value>
+  <description>
+    This controls the minimum amount of time
+    file descriptors need to sit in the client cache context
+    before they can be closed for being inactive for too long.
+  </description>
+</property>
+
+<property>
+  <name>dfs.datanode.shared.file.descriptor.paths</name>
+  <value>/dev/shm,/tmp</value>
+  <description>
+    Comma separated paths to the directory on which
+    shared memory segments are created.
+    The client and the DataNode exchange information via
+    this shared memory segment.
+    It tries paths in order until creation of shared memory segment succeeds.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.use.legacy.blockreader.local</name>
+  <value>false</value>
+  <description>
+    Legacy short-circuit reader implementation based on HDFS-2246 is used
+    if this configuration parameter is true.
+    This is for the platforms other than Linux
+    where the new implementation based on HDFS-347 is not available.
+  </description>
+</property>
+
+<property>
+  <name>dfs.block.local-path-access.user</name>
+  <value></value>
+  <description>
+    Comma separated list of the users allowd to open block files
+    on legacy short-circuit local read.
+  </description>
+</property>
+
+<property>
+  <name>dfs.client.domain.socket.data.traffic</name>
+  <value>false</value>
+  <description>
+    This control whether we will try to pass normal data traffic
+    over UNIX domain socket rather than over TCP socket
+    on node-local data transfer.
+    This is currently experimental and turned off by default.
+  </description>
+</property>
+
+<property>
+  <name>dfs.namenode.reject-unresolved-dn-topology-mapping</name>
+  <value>false</value>
+  <description>
+    If the value is set to true, then namenode will reject datanode 
+    registration if the topology mapping for a datanode is not resolved and 
+    NULL is returned (script defined by net.topology.script.file.name fails 
+    to execute). Otherwise, datanode will be registered and the default rack 
+    will be assigned as the topology path. Topology paths are important for 
+    data resiliency, since they define fault domains. Thus it may be unwanted 
+    behavior to allow datanode registration with the default rack if the 
+    resolving topology failed.
   </description>
 </property>
 

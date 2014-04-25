@@ -55,7 +55,7 @@ public abstract class WebApp extends ServletModule {
 
   private volatile String name;
   private volatile List<String> servePathSpecs = new ArrayList<String>();
-  // path to redirect to if user goes to "/"
+  // path to redirect to
   private volatile String redirectPath;
   private volatile String wsName;
   private volatile Configuration conf;
@@ -122,6 +122,10 @@ public abstract class WebApp extends ServletModule {
 
   public String name() { return this.name; }
 
+  public String wsName() {
+    return this.wsName;
+  }
+
   void addServePathSpec(String path) { this.servePathSpecs.add(path); }
 
   public String[] getServePathSpecs() {
@@ -134,7 +138,9 @@ public abstract class WebApp extends ServletModule {
    * more easily differentiate the different webapps.
    * @param path  the path to redirect to
    */
-  void setRedirectPath(String path) { this.redirectPath = path; }
+  void setRedirectPath(String path) {
+    this.redirectPath = path;
+  }
 
   void setWebServices (String name) { this.wsName = name; }
 
@@ -158,6 +164,10 @@ public abstract class WebApp extends ServletModule {
       serve(path).with(Dispatcher.class);
     }
 
+    configureWebAppServlets();
+  }
+
+  protected void configureWebAppServlets() {
     // Add in the web services filters/serves if app has them.
     // Using Jersey/guice integration module. If user has web services
     // they must have also bound a default one in their webapp code.
@@ -176,9 +186,12 @@ public abstract class WebApp extends ServletModule {
       params.put(FeaturesAndProperties.FEATURE_XMLROOTELEMENT_PROCESSING, "true");
       params.put(ResourceConfig.PROPERTY_CONTAINER_REQUEST_FILTERS, GZIPContentEncodingFilter.class.getName());
       params.put(ResourceConfig.PROPERTY_CONTAINER_RESPONSE_FILTERS, GZIPContentEncodingFilter.class.getName());
-      filter("/*").through(GuiceContainer.class, params);
+      filter("/*").through(getWebAppFilterClass(), params);
     }
+  }
 
+  protected Class<? extends GuiceContainer> getWebAppFilterClass() {
+    return GuiceContainer.class;
   }
 
   /**
@@ -268,4 +281,5 @@ public abstract class WebApp extends ServletModule {
   }
 
   public abstract void setup();
+
 }

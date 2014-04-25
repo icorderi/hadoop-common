@@ -35,11 +35,11 @@ import org.apache.hadoop.test.PathUtils;
 import org.junit.Test;
 
 /**
- * Test of the URL stream handler factory.
+ * Test of the URL stream handler.
  */
 public class TestUrlStreamHandler {
 
-  private static File TEST_ROOT_DIR = PathUtils.getTestDir(TestUrlStreamHandler.class);
+  private static final File TEST_ROOT_DIR = PathUtils.getTestDir(TestUrlStreamHandler.class);
     
   /**
    * Test opening and reading from an InputStream through a hdfs:// URL.

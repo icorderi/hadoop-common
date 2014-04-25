@@ -28,6 +28,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -43,6 +44,7 @@ import org.apache.hadoop.yarn.state.InvalidStateTransitonException;
 import org.apache.hadoop.yarn.state.SingleArcTransition;
 import org.apache.hadoop.yarn.state.StateMachine;
 import org.apache.hadoop.yarn.state.StateMachineFactory;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
@@ -147,8 +149,9 @@ public class RMContainerImpl implements RMContainer {
   private Priority reservedPriority;
   private long startTime;
   private long finishTime;
-  private String logURL;
   private ContainerStatus finishedStatus;
+
+
 
 
   public RMContainerImpl(Container container,
@@ -247,7 +250,11 @@ public class RMContainerImpl implements RMContainer {
   public String getDiagnosticsInfo() {
     try {
       readLock.lock();
-      return finishedStatus.getDiagnostics();
+      if (getFinishedStatus() != null) {
+        return getFinishedStatus().getDiagnostics();
+      } else {
+        return null;
+      }
     } finally {
       readLock.unlock();
     }
@@ -257,7 +264,8 @@ public class RMContainerImpl implements RMContainer {
   public String getLogURL() {
     try {
       readLock.lock();
-      return logURL;
+      return WebAppUtils.getRunningLogURL("//" + container.getNodeHttpAddress(),
+          ConverterUtils.toString(containerId), user);
     } finally {
       readLock.unlock();
     }
@@ -267,7 +275,11 @@ public class RMContainerImpl implements RMContainer {
   public int getContainerExitStatus() {
     try {
       readLock.lock();
-      return finishedStatus.getExitStatus();
+      if (getFinishedStatus() != null) {
+        return getFinishedStatus().getExitStatus();
+      } else {
+        return 0;
+      }
     } finally {
       readLock.unlock();
     }
@@ -277,7 +289,11 @@ public class RMContainerImpl implements RMContainer {
   public ContainerState getContainerState() {
     try {
       readLock.lock();
-      return finishedStatus.getState();
+      if (getFinishedStatus() != null) {
+        return getFinishedStatus().getState();
+      } else {
+        return ContainerState.RUNNING;
+      }
     } finally {
       readLock.unlock();
     }
@@ -312,6 +328,10 @@ public class RMContainerImpl implements RMContainer {
     }
   }
   
+  public ContainerStatus getFinishedStatus() {
+    return finishedStatus;
+  }
+  
   private static class BaseTransition implements
       SingleArcTransition<RMContainerImpl, RMContainerEvent> {
 
@@ -340,7 +360,7 @@ public class RMContainerImpl implements RMContainer {
     @Override
     public void transition(RMContainerImpl container, RMContainerEvent event) {
       container.eventHandler.handle(new RMAppAttemptContainerAllocatedEvent(
-          container.appAttemptId, container.container));
+          container.appAttemptId));
     }
   }
 
@@ -361,11 +381,6 @@ public class RMContainerImpl implements RMContainer {
 
     @Override
     public void transition(RMContainerImpl container, RMContainerEvent event) {
-      // The logs of running containers should be found on NM webUI
-      // The logs should be accessible after the container is launched
-      container.logURL = WebAppUtils.getLogUrl(container.container
-          .getNodeHttpAddress(), container.getAllocatedNode().toString(),
-          container.containerId, container.user);
       // Unregister from containerAllocationExpirer.
       container.containerAllocationExpirer.unregister(container
           .getContainerId());
@@ -380,9 +395,6 @@ public class RMContainerImpl implements RMContainer {
 
       container.finishTime = System.currentTimeMillis();
       container.finishedStatus = finishedEvent.getRemoteContainerStatus();
-      // TODO: when AHS webUI is ready, logURL should be updated to point to
-      // the web page that will show the aggregated logs
-
       // Inform AppAttempt
       container.eventHandler.handle(new RMAppAttemptContainerFinishedEvent(
           container.appAttemptId, finishedEvent.getRemoteContainerStatus()));
@@ -396,7 +408,6 @@ public class RMContainerImpl implements RMContainer {
       FinishedTransition {
     @Override
     public void transition(RMContainerImpl container, RMContainerEvent event) {
-
       // Unregister from containerAllocationExpirer.
       container.containerAllocationExpirer.unregister(container
           .getContainerId());
@@ -422,6 +433,22 @@ public class RMContainerImpl implements RMContainer {
       // Inform appAttempt
       super.transition(container, event);
     }
+  }
+
+  @Override
+  public ContainerReport createContainerReport() {
+    this.readLock.lock();
+    ContainerReport containerReport = null;
+    try {
+      containerReport = ContainerReport.newInstance(this.getContainerId(),
+          this.getAllocatedResource(), this.getAllocatedNode(),
+          this.getAllocatedPriority(), this.getStartTime(),
+          this.getFinishTime(), this.getDiagnosticsInfo(), this.getLogURL(),
+          this.getContainerExitStatus(), this.getContainerState());
+    } finally {
+      this.readLock.unlock();
+    }
+    return containerReport;
   }
 
 }

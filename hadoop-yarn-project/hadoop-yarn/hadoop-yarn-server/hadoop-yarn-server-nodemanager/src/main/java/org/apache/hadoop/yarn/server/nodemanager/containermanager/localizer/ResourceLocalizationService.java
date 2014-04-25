@@ -44,6 +44,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
@@ -82,8 +83,8 @@ import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.DeletionService;
-import org.apache.hadoop.yarn.server.nodemanager.LocalDirsHandlerService;
 import org.apache.hadoop.yarn.server.nodemanager.DeletionService.FileDeletionTask;
+import org.apache.hadoop.yarn.server.nodemanager.LocalDirsHandlerService;
 import org.apache.hadoop.yarn.server.nodemanager.api.LocalizationProtocol;
 import org.apache.hadoop.yarn.server.nodemanager.api.ResourceLocalizationSpec;
 import org.apache.hadoop.yarn.server.nodemanager.api.protocolrecords.LocalResourceStatus;
@@ -118,6 +119,8 @@ import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.FSDownload;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.LoadingCache;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 public class ResourceLocalizationService extends CompositeService
@@ -361,8 +364,11 @@ public class ResourceLocalizationService extends CompositeService
   private void handleInitContainerResources(
       ContainerLocalizationRequestEvent rsrcReqs) {
     Container c = rsrcReqs.getContainer();
+    // create a loading cache for the file statuses
+    LoadingCache<Path,Future<FileStatus>> statCache =
+        CacheBuilder.newBuilder().build(FSDownload.createStatusCacheLoader(getConfig()));
     LocalizerContext ctxt = new LocalizerContext(
-        c.getUser(), c.getContainerId(), c.getCredentials());
+        c.getUser(), c.getContainerId(), c.getCredentials(), statCache);
     Map<LocalResourceVisibility, Collection<LocalResourceRequest>> rsrcs =
       rsrcReqs.getRequestedResources();
     for (Map.Entry<LocalResourceVisibility, Collection<LocalResourceRequest>> e :
@@ -679,13 +685,21 @@ public class ResourceLocalizationService extends CompositeService
             // completing and being dequeued before pending updated
             synchronized (pending) {
               pending.put(queue.submit(new FSDownload(lfs, null, conf,
-                  publicDirDestPath, resource)), request);
+                  publicDirDestPath, resource, request.getContext().getStatCache())),
+                  request);
             }
           } catch (IOException e) {
             rsrc.unlock();
-            // TODO Need to Fix IO Exceptions - Notifying resource
+            publicRsrc.handle(new ResourceFailedLocalizationEvent(request
+              .getResource().getRequest(), e.getMessage()));
             LOG.error("Local path for public localization is not found. "
                 + " May be disks failed.", e);
+          } catch (RejectedExecutionException re) {
+            rsrc.unlock();
+            publicRsrc.handle(new ResourceFailedLocalizationEvent(request
+              .getResource().getRequest(), re.getMessage()));
+            LOG.error("Failed to submit rsrc " + rsrc + " for download."
+                + " Either queue is full or threadpool is shutdown.", re);
           }
         } else {
           rsrc.unlock();

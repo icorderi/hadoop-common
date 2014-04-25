@@ -28,8 +28,9 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpConfig.Policy;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.service.CompositeService;
@@ -129,6 +130,20 @@ public class NodeManager extends CompositeService
 
     conf.setBoolean(Dispatcher.DISPATCHER_EXIT_ON_ERROR_KEY, true);
 
+    boolean recoveryEnabled = conf.getBoolean(
+        YarnConfiguration.NM_RECOVERY_ENABLED,
+        YarnConfiguration.DEFAULT_NM_RECOVERY_ENABLED);
+    if (recoveryEnabled) {
+      FileSystem recoveryFs = FileSystem.getLocal(conf);
+      String recoveryDirName = conf.get(YarnConfiguration.NM_RECOVERY_DIR);
+      if (recoveryDirName == null) {
+        throw new IllegalArgumentException("Recovery is enabled but " +
+            YarnConfiguration.NM_RECOVERY_DIR + " is not set.");
+      }
+      Path recoveryRoot = new Path(recoveryDirName);
+      recoveryFs.mkdirs(recoveryRoot, new FsPermission((short)0700));
+    }
+
     NMContainerTokenSecretManager containerTokenSecretManager =
         new NMContainerTokenSecretManager(conf);
 
@@ -226,11 +241,17 @@ public class NodeManager extends CompositeService
     new Thread() {
       @Override
       public void run() {
-        LOG.info("Notifying ContainerManager to block new container-requests");
-        containerManager.setBlockNewContainerRequests(true);
-        LOG.info("Cleaning up running containers on resync");
-        containerManager.cleanupContainersOnNMResync();
-        ((NodeStatusUpdaterImpl) nodeStatusUpdater ).rebootNodeStatusUpdater();
+        try {
+          LOG.info("Notifying ContainerManager to block new container-requests");
+          containerManager.setBlockNewContainerRequests(true);
+          LOG.info("Cleaning up running containers on resync");
+          containerManager.cleanupContainersOnNMResync();
+          ((NodeStatusUpdaterImpl) nodeStatusUpdater)
+            .rebootNodeStatusUpdaterAndRegisterWithRM();
+        } catch (YarnRuntimeException e) {
+          LOG.fatal("Error while rebooting NodeStatusUpdater.", e);
+          shutDown();
+        }
       }
     }.start();
   }
@@ -240,7 +261,7 @@ public class NodeManager extends CompositeService
     private NodeId nodeId = null;
     private final ConcurrentMap<ApplicationId, Application> applications =
         new ConcurrentHashMap<ApplicationId, Application>();
-    private final ConcurrentMap<ContainerId, Container> containers =
+    protected final ConcurrentMap<ContainerId, Container> containers =
         new ConcurrentSkipListMap<ContainerId, Container>();
 
     private final NMContainerTokenSecretManager containerTokenSecretManager;
@@ -397,14 +418,7 @@ public class NodeManager extends CompositeService
     StringUtils.startupShutdownMessage(NodeManager.class, args, LOG);
     NodeManager nodeManager = new NodeManager();
     Configuration conf = new YarnConfiguration();
-    setHttpPolicy(conf);
     nodeManager.initAndStartNodeManager(conf, false);
-  }
-  
-  private static void setHttpPolicy(Configuration conf) {
-    HttpConfig.setPolicy(Policy.fromString(conf.get(
-      YarnConfiguration.YARN_HTTP_POLICY_KEY,
-      YarnConfiguration.YARN_HTTP_POLICY_DEFAULT)));
   }
 
   @VisibleForTesting

@@ -133,7 +133,7 @@ public class IPCLoggerChannel implements AsyncLogger {
   /**
    * Stopwatch which starts counting on each heartbeat that is sent
    */
-  private Stopwatch lastHeartbeatStopwatch = new Stopwatch();
+  private final Stopwatch lastHeartbeatStopwatch = new Stopwatch();
   
   private static final long HEARTBEAT_INTERVAL_MILLIS = 1000;
 
@@ -182,7 +182,6 @@ public class IPCLoggerChannel implements AsyncLogger {
   
   @Override
   public void close() {
-    QuorumJournalManager.LOG.info("Closing", new Exception());
     // No more tasks may be submitted after this point.
     executor.shutdown();
     if (proxy != null) {
@@ -259,8 +258,7 @@ public class IPCLoggerChannel implements AsyncLogger {
 
   private synchronized RequestInfo createReqInfo() {
     Preconditions.checkState(epoch > 0, "bad epoch: " + epoch);
-    return new RequestInfo(journalId, epoch, ipcSerial++,
-        committedTxId);
+    return new RequestInfo(journalId, epoch, ipcSerial++, committedTxId);
   }
 
   @VisibleForTesting
@@ -476,11 +474,12 @@ public class IPCLoggerChannel implements AsyncLogger {
   }
   
   @Override
-  public ListenableFuture<Void> startLogSegment(final long txid) {
+  public ListenableFuture<Void> startLogSegment(final long txid,
+      final int layoutVersion) {
     return executor.submit(new Callable<Void>() {
       @Override
       public Void call() throws IOException {
-        getProxy().startLogSegment(createReqInfo(), txid);
+        getProxy().startLogSegment(createReqInfo(), txid, layoutVersion);
         synchronized (IPCLoggerChannel.this) {
           if (outOfSync) {
             outOfSync = false;
@@ -621,7 +620,18 @@ public class IPCLoggerChannel implements AsyncLogger {
       }
     });
   }
-  
+
+  @Override
+  public ListenableFuture<Void> discardSegments(final long startTxId) {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().discardSegments(journalId, startTxId);
+        return null;
+      }
+    });
+  }
+
   @Override
   public ListenableFuture<Long> getJournalCTime() {
     return executor.submit(new Callable<Long>() {

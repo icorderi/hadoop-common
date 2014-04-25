@@ -19,27 +19,23 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
-import java.lang.reflect.Constructor;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.yarn.LocalConfigurationProvider;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -60,11 +56,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMContextImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.Task;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.TestSchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
@@ -104,6 +97,7 @@ public class TestCapacityScheduler {
   private static float B3_CAPACITY = 20;
 
   private ResourceManager resourceManager = null;
+  private RMContext mockContext;
   
   @Before
   public void setUp() throws Exception {
@@ -115,9 +109,12 @@ public class TestCapacityScheduler {
     conf.setClass(YarnConfiguration.RM_SCHEDULER, 
         CapacityScheduler.class, ResourceScheduler.class);
     resourceManager.init(conf);
-    resourceManager.getRMContainerTokenSecretManager().rollMasterKey();
-    resourceManager.getRMNMTokenSecretManager().rollMasterKey();
+    resourceManager.getRMContext().getContainerTokenSecretManager().rollMasterKey();
+    resourceManager.getRMContext().getNMTokenSecretManager().rollMasterKey();
     ((AsyncDispatcher)resourceManager.getRMContext().getDispatcher()).start();
+    mockContext = mock(RMContext.class);
+    when(mockContext.getConfigurationProvider()).thenReturn(
+        new LocalConfigurationProvider());
   }
 
   @After
@@ -133,7 +130,7 @@ public class TestCapacityScheduler {
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 2048);
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB, 1024);
     try {
-      scheduler.reinitialize(conf, null);
+      scheduler.reinitialize(conf, mockContext);
       fail("Exception is expected because the min memory allocation is" +
         " larger than the max memory allocation.");
     } catch (YarnRuntimeException e) {
@@ -147,7 +144,7 @@ public class TestCapacityScheduler {
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES, 2);
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES, 1);
     try {
-      scheduler.reinitialize(conf, null);
+      scheduler.reinitialize(conf, mockContext);
       fail("Exception is expected because the min vcores allocation is" +
         " larger than the max vcores allocation.");
     } catch (YarnRuntimeException e) {
@@ -353,7 +350,7 @@ public class TestCapacityScheduler {
 
     conf.setCapacity(A, 80f);
     conf.setCapacity(B, 20f);
-    cs.reinitialize(conf,null);
+    cs.reinitialize(conf, mockContext);
     checkQueueCapacities(cs, 80f, 20f);
   }
 
@@ -503,7 +500,7 @@ public class TestCapacityScheduler {
       conf.setCapacity(B2, B2_CAPACITY);
       conf.setCapacity(B3, B3_CAPACITY);
       conf.setCapacity(B4, B4_CAPACITY);
-      cs.reinitialize(conf,null);
+      cs.reinitialize(conf,mockContext);
       checkQueueCapacities(cs, 80f, 20f);
       
       // Verify parent for B4
@@ -645,4 +642,30 @@ public class TestCapacityScheduler {
           cs.getSchedulerApplications(), cs, "a1");
     Assert.assertEquals("a1", app.getQueue().getQueueName());
   }
- }
+  
+  @Test
+  public void testAsyncScheduling() throws Exception {
+    Configuration conf = new Configuration();
+    conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
+        ResourceScheduler.class);
+    MockRM rm = new MockRM(conf);
+    rm.start();
+    CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
+
+    final int NODES = 100;
+    
+    // Register nodes
+    for (int i=0; i < NODES; ++i) {
+      String host = "192.168.1." + i;
+      RMNode node =
+          MockNodes.newNodeInfo(0, MockNodes.newResource(4 * GB), 1, host);
+      cs.handle(new NodeAddedSchedulerEvent(node));
+    }
+    
+    // Now directly exercise the scheduling loop
+    for (int i=0; i < NODES; ++i) {
+      CapacityScheduler.schedule(cs);
+    }
+  }
+
+}

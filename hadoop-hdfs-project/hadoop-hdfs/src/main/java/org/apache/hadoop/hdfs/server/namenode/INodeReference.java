@@ -213,6 +213,22 @@ public abstract class INodeReference extends INode {
   public final FsPermission getFsPermission(int snapshotId) {
     return referred.getFsPermission(snapshotId);
   }
+
+  @Override
+  final AclFeature getAclFeature(int snapshotId) {
+    return referred.getAclFeature(snapshotId);
+  }
+
+  @Override
+  final void addAclFeature(AclFeature aclFeature) {
+    referred.addAclFeature(aclFeature);
+  }
+
+  @Override
+  final void removeAclFeature() {
+    referred.removeAclFeature();
+  }
+
   @Override
   public final short getFsPermissionShort() {
     return referred.getFsPermissionShort();
@@ -401,6 +417,23 @@ public abstract class INodeReference extends INode {
       } else {
         return withNameList.get(-i - 2);
       }
+    }
+
+    public INodeReference getParentRef(int snapshotId) {
+      // when the given snapshotId is CURRENT_STATE_ID, it is possible that we
+      // do not know where the corresponding inode belongs, thus we simply
+      // return the last reference node
+      if (snapshotId == Snapshot.CURRENT_STATE_ID) {
+        return this.getParentReference() != null ? this.getParentReference()
+            : this.getLastWithName();
+      }
+      // otherwise we search the withNameList
+      for (int i = 0; i < withNameList.size(); i++) {
+        if (snapshotId <= withNameList.get(i).lastSnapshotId) {
+          return withNameList.get(i);
+        }
+      }
+      return this.getParentReference();
     }
   }
   

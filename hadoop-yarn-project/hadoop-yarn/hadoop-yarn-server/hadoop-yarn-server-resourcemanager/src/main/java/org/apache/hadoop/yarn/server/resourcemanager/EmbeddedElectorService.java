@@ -23,6 +23,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ha.ActiveStandbyElector;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.ServiceFailedException;
@@ -31,14 +32,12 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ZKUtil;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerServiceProtos;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.ACL;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.List;
 
 @InterfaceAudience.Private
@@ -74,11 +73,7 @@ public class EmbeddedElectorService extends AbstractService
     }
 
     String rmId = HAUtil.getRMHAId(conf);
-    String clusterId = conf.get(YarnConfiguration.RM_CLUSTER_ID);
-    if (clusterId == null) {
-      throw new YarnRuntimeException(YarnConfiguration.RM_CLUSTER_ID +
-          " is not specified!");
-    }
+    String clusterId = YarnConfiguration.getClusterId(conf);
     localActiveNodeInfo = createActiveNodeInfo(clusterId, rmId);
 
     String zkBasePath = conf.get(YarnConfiguration.AUTO_FAILOVER_ZK_BASE_PATH,
@@ -88,21 +83,14 @@ public class EmbeddedElectorService extends AbstractService
     long zkSessionTimeout = conf.getLong(YarnConfiguration.RM_ZK_TIMEOUT_MS,
         YarnConfiguration.DEFAULT_RM_ZK_TIMEOUT_MS);
 
-    String zkAclConf = conf.get(YarnConfiguration.RM_ZK_ACL,
-        YarnConfiguration.DEFAULT_RM_ZK_ACL);
-    List<ACL> zkAcls;
-    try {
-      zkAcls = ZKUtil.parseACLs(ZKUtil.resolveConfIndirection(zkAclConf));
-    } catch (ZKUtil.BadAclFormatException bafe) {
-      throw new YarnRuntimeException(
-          YarnConfiguration.RM_ZK_ACL + "has ill-formatted ACLs");
-    }
+    List<ACL> zkAcls = RMZKUtils.getZKAcls(conf);
+    List<ZKUtil.ZKAuthInfo> zkAuths = RMZKUtils.getZKAuths(conf);
 
-    // TODO (YARN-1528): ZKAuthInfo to be set for rm-store and elector
-    List<ZKUtil.ZKAuthInfo> zkAuths = Collections.emptyList();
-
+    int maxRetryNum = conf.getInt(
+        CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_KEY,
+        CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT);
     elector = new ActiveStandbyElector(zkQuorum, (int) zkSessionTimeout,
-        electionZNode, zkAcls, zkAuths, this);
+        electionZNode, zkAcls, zkAuths, this, maxRetryNum);
 
     elector.ensureParentZNode();
     if (!isParentZnodeSafe(clusterId)) {

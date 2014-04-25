@@ -18,6 +18,12 @@
 
 package org.apache.hadoop.ipc;
 
+import static org.apache.hadoop.ipc.RpcConstants.AUTHORIZATION_FAILED_CALL_ID;
+import static org.apache.hadoop.ipc.RpcConstants.CONNECTION_CONTEXT_CALL_ID;
+import static org.apache.hadoop.ipc.RpcConstants.CURRENT_VERSION;
+import static org.apache.hadoop.ipc.RpcConstants.HEADER_LEN_AFTER_HRPC_PART;
+import static org.apache.hadoop.ipc.RpcConstants.PING_CALL_ID;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -66,6 +72,7 @@ import javax.security.sasl.SaslServer;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configuration.IntegerRanges;
@@ -74,8 +81,6 @@ import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
-import static org.apache.hadoop.ipc.RpcConstants.*;
-
 import org.apache.hadoop.ipc.ProtobufRpcEngine.RpcResponseMessageWrapper;
 import org.apache.hadoop.ipc.ProtobufRpcEngine.RpcResponseWrapper;
 import org.apache.hadoop.ipc.RPC.RpcInvoker;
@@ -93,6 +98,7 @@ import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcSaslProto.SaslAuth;
 import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcSaslProto.SaslState;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.SaslPropertiesResolver;
 import org.apache.hadoop.security.SaslRpcServer;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.SecurityUtil;
@@ -355,6 +361,7 @@ public abstract class Server {
   private Configuration conf;
   private String portRangeConfig = null;
   private SecretManager<TokenIdentifier> secretManager;
+  private SaslPropertiesResolver saslPropsResolver;
   private ServiceAuthorizationManager serviceAuthorizationManager = new ServiceAuthorizationManager();
 
   private int maxQueueSize;
@@ -364,7 +371,7 @@ public abstract class Server {
   private final boolean tcpNoDelay; // if T then disable Nagle's Algorithm
 
   volatile private boolean running = true;         // true while server runs
-  private BlockingQueue<Call> callQueue; // queued calls
+  private CallQueueManager<Call> callQueue;
 
   // maintains the set of client connections and handles idle timeouts
   private ConnectionManager connectionManager;
@@ -451,6 +458,15 @@ public abstract class Server {
   }
 
   /**
+   * Refresh the service authorization ACL for the service handled by this server
+   * using the specified Configuration.
+   */
+  @Private
+  public void refreshServiceAclWithLoadedConfiguration(Configuration conf,
+      PolicyProvider provider) {
+    serviceAuthorizationManager.refreshWithLoadedConfiguration(conf, provider);
+  }
+  /**
    * Returns a handle to the serviceAuthorizationManager (required in tests)
    * @return instance of ServiceAuthorizationManager for this server
    */
@@ -459,8 +475,28 @@ public abstract class Server {
     return serviceAuthorizationManager;
   }
 
+  static Class<? extends BlockingQueue<Call>> getQueueClass(
+      String prefix, Configuration conf) {
+    String name = prefix + "." + CommonConfigurationKeys.IPC_CALLQUEUE_IMPL_KEY;
+    Class<?> queueClass = conf.getClass(name, LinkedBlockingQueue.class);
+    return CallQueueManager.convertQueueClass(queueClass, Call.class);
+  }
+
+  private String getQueueClassPrefix() {
+    return CommonConfigurationKeys.IPC_CALLQUEUE_NAMESPACE + "." + port;
+  }
+
+  /*
+   * Refresh the call queue
+   */
+  public synchronized void refreshCallQueue(Configuration conf) {
+    // Create the next queue
+    String prefix = getQueueClassPrefix();
+    callQueue.swapQueue(getQueueClass(prefix, conf), maxQueueSize, prefix, conf);
+  }
+
   /** A call queued for handling. */
-  public static class Call {
+  public static class Call implements Schedulable {
     private final int callId;             // the client's call id
     private final int retryCount;        // the retry count of the call
     private final Writable rpcRequest;    // Serialized Rpc request from client
@@ -498,6 +534,12 @@ public abstract class Server {
     public void setResponse(ByteBuffer response) {
       this.rpcResponse = response;
     }
+
+    // For Schedulable
+    @Override
+    public UserGroupInformation getUserGroupInformation() {
+      return connection.user;
+    }    
   }
 
   /** Listens on the socket. Creates jobs for the handler threads*/
@@ -1216,9 +1258,9 @@ public abstract class Server {
       Throwable cause = e;
       while (cause != null) {
         if (cause instanceof RetriableException) {
-          return (RetriableException) cause;
+          return cause;
         } else if (cause instanceof StandbyException) {
-          return (StandbyException) cause;
+          return cause;
         } else if (cause instanceof InvalidToken) {
           // FIXME: hadoop method signatures are restricting the SASL
           // callbacks to only returning InvalidToken, but some services
@@ -1312,7 +1354,7 @@ public abstract class Server {
     private RpcSaslProto processSaslMessage(RpcSaslProto saslMessage)
         throws SaslException, IOException, AccessControlException,
         InterruptedException {
-      RpcSaslProto saslResponse = null;
+      final RpcSaslProto saslResponse;
       final SaslState state = saslMessage.getState(); // required      
       switch (state) {
         case NEGOTIATE: {
@@ -1349,33 +1391,40 @@ public abstract class Server {
           // SIMPLE is a legit option above.  we will send no response
           if (authMethod == AuthMethod.SIMPLE) {
             switchToSimple();
+            saslResponse = null;
             break;
           }
           // sasl server for tokens may already be instantiated
           if (saslServer == null || authMethod != AuthMethod.TOKEN) {
             saslServer = createSaslServer(authMethod);
           }
-          // fallthru to process sasl token
+          saslResponse = processSaslToken(saslMessage);
+          break;
         }
         case RESPONSE: {
-          if (!saslMessage.hasToken()) {
-            throw new SaslException("Client did not send a token");
-          }
-          byte[] saslToken = saslMessage.getToken().toByteArray();
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("Have read input token of size " + saslToken.length
-                + " for processing by saslServer.evaluateResponse()");
-          }
-          saslToken = saslServer.evaluateResponse(saslToken);
-          saslResponse = buildSaslResponse(
-              saslServer.isComplete() ? SaslState.SUCCESS : SaslState.CHALLENGE,
-              saslToken);
+          saslResponse = processSaslToken(saslMessage);
           break;
         }
         default:
           throw new SaslException("Client sent unsupported state " + state);
       }
       return saslResponse;
+    }
+
+    private RpcSaslProto processSaslToken(RpcSaslProto saslMessage)
+        throws SaslException {
+      if (!saslMessage.hasToken()) {
+        throw new SaslException("Client did not send a token");
+      }
+      byte[] saslToken = saslMessage.getToken().toByteArray();
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Have read input token of size " + saslToken.length
+            + " for processing by saslServer.evaluateResponse()");
+      }
+      saslToken = saslServer.evaluateResponse(saslToken);
+      return buildSaslResponse(
+          saslServer.isComplete() ? SaslState.SUCCESS : SaslState.CHALLENGE,
+          saslToken);
     }
 
     private void switchToSimple() {
@@ -1596,7 +1645,9 @@ public abstract class Server {
     
     private SaslServer createSaslServer(AuthMethod authMethod)
         throws IOException, InterruptedException {
-      return new SaslRpcServer(authMethod).create(this, secretManager);
+      final Map<String,?> saslProps =
+                  saslPropsResolver.getServerProperties(addr);
+      return new SaslRpcServer(authMethod).create(this, saslProps, secretManager);
     }
     
     /**
@@ -1932,7 +1983,7 @@ public abstract class Server {
         // authentication
         if (user != null && user.getRealUser() != null
             && (authMethod != AuthMethod.TOKEN)) {
-          ProxyUsers.authorize(user, this.getHostAddress(), conf);
+          ProxyUsers.authorize(user, this.getHostAddress());
         }
         authorize(user, protocolName, getHostInetAddress());
         if (LOG.isDebugEnabled()) {
@@ -2056,16 +2107,15 @@ public abstract class Server {
             if (e instanceof UndeclaredThrowableException) {
               e = e.getCause();
             }
-            String logMsg = Thread.currentThread().getName() + ", call " + call + ": error: " + e;
-            if (e instanceof RuntimeException || e instanceof Error) {
+            String logMsg = Thread.currentThread().getName() + ", call " + call;
+            if (exceptionsHandler.isTerse(e.getClass())) {
+              // Don't log the whole stack trace. Way too noisy!
+              LOG.info(logMsg + ": " + e);
+            } else if (e instanceof RuntimeException || e instanceof Error) {
               // These exception types indicate something is probably wrong
               // on the server side, as opposed to just a normal exceptional
               // result.
               LOG.warn(logMsg, e);
-            } else if (exceptionsHandler.isTerse(e.getClass())) {
-             // Don't log the whole stack trace of these exceptions.
-              // Way too noisy!
-              LOG.info(logMsg);
             } else {
               LOG.info(logMsg, e);
             }
@@ -2183,7 +2233,12 @@ public abstract class Server {
     this.readerPendingConnectionQueue = conf.getInt(
         CommonConfigurationKeys.IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_KEY,
         CommonConfigurationKeys.IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_DEFAULT);
-    this.callQueue  = new LinkedBlockingQueue<Call>(maxQueueSize); 
+
+    // Setup appropriate callqueue
+    final String prefix = getQueueClassPrefix();
+    this.callQueue = new CallQueueManager<Call>(getQueueClass(prefix, conf),
+        maxQueueSize, prefix, conf);
+
     this.secretManager = (SecretManager<TokenIdentifier>) secretManager;
     this.authorize = 
       conf.getBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, 
@@ -2208,6 +2263,7 @@ public abstract class Server {
     
     if (secretManager != null || UserGroupInformation.isSecurityEnabled()) {
       SaslRpcServer.init(conf);
+      saslPropsResolver = SaslPropertiesResolver.getInstance(conf);
     }
     
     this.exceptionsHandler.addTerseExceptions(StandbyException.class);

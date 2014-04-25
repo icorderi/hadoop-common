@@ -18,6 +18,10 @@
 
 package org.apache.hadoop.mapreduce.v2.hs;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic
+    .NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -25,21 +29,24 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringTokenizer;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapreduce.Counters;
+import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapreduce.TypeConverter;
@@ -51,7 +58,10 @@ import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.AMInfo;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.JobInfo;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.TaskAttemptInfo;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.TaskInfo;
+import org.apache.hadoop.mapreduce.jobhistory.JobUnsuccessfulCompletionEvent;
+import org.apache.hadoop.mapreduce.jobhistory.TaskFailedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.TaskFinishedEvent;
+import org.apache.hadoop.mapreduce.jobhistory.TaskStartedEvent;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
@@ -62,14 +72,16 @@ import org.apache.hadoop.mapreduce.v2.api.records.impl.pb.JobIdPBImpl;
 import org.apache.hadoop.mapreduce.v2.api.records.impl.pb.TaskIdPBImpl;
 import org.apache.hadoop.mapreduce.v2.app.MRApp;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.JobImpl;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
+import org.apache.hadoop.mapreduce.v2.app.job.event.JobEvent;
+import org.apache.hadoop.mapreduce.v2.app.job.event.JobEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.hs.HistoryFileManager.HistoryFileInfo;
 import org.apache.hadoop.mapreduce.v2.hs.TestJobHistoryEvents.MRAppWithHistory;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobsInfo;
-import org.apache.hadoop.mapreduce.v2.jobhistory.FileNameIndexUtils;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobIndexInfo;
 import org.apache.hadoop.net.DNSToSwitchMapping;
@@ -146,7 +158,7 @@ public class TestJobHistoryParsing {
     conf.set(MRJobConfig.USER_NAME, System.getProperty("user.name"));
     long amStartTimeEst = System.currentTimeMillis();
     conf.setClass(
-        CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+        NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
         MyResolver.class, DNSToSwitchMapping.class);
     RackResolver.init(conf);
     MRApp app = new MRAppWithHistory(numMaps, numReduces, true, this.getClass()
@@ -387,7 +399,7 @@ public class TestJobHistoryParsing {
     try {
       Configuration conf = new Configuration();
       conf.setClass(
-          CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+          NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
           MyResolver.class, DNSToSwitchMapping.class);
       RackResolver.init(conf);
       MRApp app = new MRAppWithHistoryWithFailedAttempt(2, 1, true, this
@@ -452,7 +464,7 @@ public class TestJobHistoryParsing {
     try {
       Configuration conf = new Configuration();
       conf.setClass(
-          CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+          NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
           MyResolver.class, DNSToSwitchMapping.class);
       RackResolver.init(conf);
       MRApp app = new MRAppWithHistoryWithFailedTask(2, 1, true, this
@@ -496,8 +508,75 @@ public class TestJobHistoryParsing {
         Assert.assertNotNull("completed task report has null counters", ct
             .getReport().getCounters());
       }
+      final List<String> originalDiagnostics = job.getDiagnostics();
+      final String historyError = jobInfo.getErrorInfo();
+      assertTrue("No original diagnostics for a failed job",
+          originalDiagnostics != null && !originalDiagnostics.isEmpty());
+      assertNotNull("No history error info for a failed job ", historyError);
+      for (String diagString : originalDiagnostics) {
+        assertTrue(historyError.contains(diagString));
+      }
     } finally {
       LOG.info("FINISHED testCountersForFailedTask");
+    }
+  }
+
+  @Test(timeout = 60000)
+  public void testDiagnosticsForKilledJob() throws Exception {
+    LOG.info("STARTING testDiagnosticsForKilledJob");
+    try {
+      final Configuration conf = new Configuration();
+      conf.setClass(
+          NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+          MyResolver.class, DNSToSwitchMapping.class);
+      RackResolver.init(conf);
+      MRApp app = new MRAppWithHistoryWithJobKilled(2, 1, true, this
+          .getClass().getName(), true);
+      app.submit(conf);
+      Job job = app.getContext().getAllJobs().values().iterator().next();
+      JobId jobId = job.getID();
+      app.waitForState(job, JobState.KILLED);
+
+      // make sure all events are flushed
+      app.waitForState(Service.STATE.STOPPED);
+
+      JobHistory jobHistory = new JobHistory();
+      jobHistory.init(conf);
+
+      HistoryFileInfo fileInfo = jobHistory.getJobFileInfo(jobId);
+
+      JobHistoryParser parser;
+      JobInfo jobInfo;
+      synchronized (fileInfo) {
+        Path historyFilePath = fileInfo.getHistoryFile();
+        FSDataInputStream in = null;
+        FileContext fc = null;
+        try {
+          fc = FileContext.getFileContext(conf);
+          in = fc.open(fc.makeQualified(historyFilePath));
+        } catch (IOException ioe) {
+          LOG.info("Can not open history file: " + historyFilePath, ioe);
+          throw (new Exception("Can not open History File"));
+        }
+
+        parser = new JobHistoryParser(in);
+        jobInfo = parser.parse();
+      }
+      Exception parseException = parser.getParseException();
+      assertNull("Caught an expected exception " + parseException,
+          parseException);
+      final List<String> originalDiagnostics = job.getDiagnostics();
+      final String historyError = jobInfo.getErrorInfo();
+      assertTrue("No original diagnostics for a failed job",
+          originalDiagnostics != null && !originalDiagnostics.isEmpty());
+      assertNotNull("No history error info for a failed job ", historyError);
+      for (String diagString : originalDiagnostics) {
+        assertTrue(historyError.contains(diagString));
+      }
+      assertTrue("No killed message in diagnostics",
+        historyError.contains(JobImpl.JOB_KILLED_DIAG));
+    } finally {
+      LOG.info("FINISHED testDiagnosticsForKilledJob");
     }
   }
 
@@ -507,7 +586,7 @@ public class TestJobHistoryParsing {
     try {
       Configuration conf = new Configuration();
       conf.setClass(
-          CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+          NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
           MyResolver.class, DNSToSwitchMapping.class);
       RackResolver.init(conf);
       MRApp app = new MRAppWithHistory(1, 1, true, this.getClass().getName(),
@@ -587,6 +666,27 @@ public class TestJobHistoryParsing {
     }
   }
 
+  static class MRAppWithHistoryWithJobKilled extends MRAppWithHistory {
+
+    public MRAppWithHistoryWithJobKilled(int maps, int reduces,
+        boolean autoComplete, String testName, boolean cleanOnStart) {
+      super(maps, reduces, autoComplete, testName, cleanOnStart);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    protected void attemptLaunched(TaskAttemptId attemptID) {
+      if (attemptID.getTaskId().getId() == 0) {
+        getContext().getEventHandler().handle(
+            new JobEvent(attemptID.getTaskId().getJobId(),
+                JobEventType.JOB_KILL));
+      } else {
+        getContext().getEventHandler().handle(
+            new TaskAttemptEvent(attemptID, TaskAttemptEventType.TA_DONE));
+      }
+    }
+  }
+
   static class HistoryFileManagerForTest extends HistoryFileManager {
     void deleteJobFromJobListCache(HistoryFileInfo fileInfo) {
       jobListCache.delete(fileInfo);
@@ -610,7 +710,7 @@ public class TestJobHistoryParsing {
       Configuration conf = new Configuration();
 
       conf.setClass(
-          CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+          NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
           MyResolver.class, DNSToSwitchMapping.class);
 
       RackResolver.init(conf);
@@ -665,7 +765,7 @@ public class TestJobHistoryParsing {
       Configuration configuration = new Configuration();
       configuration
           .setClass(
-              CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+              NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
               MyResolver.class, DNSToSwitchMapping.class);
 
       RackResolver.init(configuration);
@@ -729,5 +829,66 @@ public class TestJobHistoryParsing {
     assertTrue(test.checkAccess(UserGroupInformation.getCurrentUser(), null));
     assertNull(test.getAMInfos());
 
+  }
+
+  @Test
+  public void testMultipleFailedTasks() throws Exception {
+    JobHistoryParser parser =
+        new JobHistoryParser(Mockito.mock(FSDataInputStream.class));
+    EventReader reader = Mockito.mock(EventReader.class);
+    final AtomicInteger numEventsRead = new AtomicInteger(0); // Hack!
+    final org.apache.hadoop.mapreduce.TaskType taskType =
+        org.apache.hadoop.mapreduce.TaskType.MAP;
+    final TaskID[] tids = new TaskID[2];
+    final JobID jid = new JobID("1", 1);
+    tids[0] = new TaskID(jid, taskType, 0);
+    tids[1] = new TaskID(jid, taskType, 1);
+    Mockito.when(reader.getNextEvent()).thenAnswer(
+        new Answer<HistoryEvent>() {
+          public HistoryEvent answer(InvocationOnMock invocation)
+              throws IOException {
+            // send two task start and two task fail events for tasks 0 and 1
+            int eventId = numEventsRead.getAndIncrement();
+            TaskID tid = tids[eventId & 0x1];
+            if (eventId < 2) {
+              return new TaskStartedEvent(tid, 0, taskType, "");
+            }
+            if (eventId < 4) {
+              TaskFailedEvent tfe = new TaskFailedEvent(tid, 0, taskType,
+                  "failed", "FAILED", null, new Counters());
+              tfe.setDatum(tfe.getDatum());
+              return tfe;
+            }
+            if (eventId < 5) {
+              JobUnsuccessfulCompletionEvent juce =
+                  new JobUnsuccessfulCompletionEvent(jid, 100L, 2, 0,
+                      "JOB_FAILED", Collections.singletonList(
+                          "Task failed: " + tids[0].toString()));
+              return juce;
+            }
+            return null;
+          }
+        });
+    JobInfo info = parser.parse(reader);
+    assertTrue("Task 0 not implicated",
+        info.getErrorInfo().contains(tids[0].toString()));
+  }
+
+  @Test
+  public void testFailedJobHistoryWithoutDiagnostics() throws Exception {
+    final Path histPath = new Path(getClass().getClassLoader().getResource(
+        "job_1393307629410_0001-1393307687476-user-Sleep+job-1393307723835-0-0-FAILED-default-1393307693920.jhist")
+        .getFile());
+    final FileSystem lfs = FileSystem.getLocal(new Configuration());
+    final FSDataInputStream fsdis = lfs.open(histPath);
+    try {
+      JobHistoryParser parser = new JobHistoryParser(fsdis);
+      JobInfo info = parser.parse();
+      assertEquals("History parsed jobId incorrectly",
+          info.getJobId(), JobID.forName("job_1393307629410_0001") );
+      assertEquals("Default diagnostics incorrect ", "", info.getErrorInfo());
+    } finally {
+      fsdis.close();
+    }
   }
 }

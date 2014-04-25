@@ -256,11 +256,24 @@
 <property>
   <name>hadoop.rpc.protection</name>
   <value>authentication</value>
-  <description>This field sets the quality of protection for secured sasl 
+  <description>A comma-separated list of protection values for secured sasl 
       connections. Possible values are authentication, integrity and privacy.
       authentication means authentication only and no integrity or privacy; 
       integrity implies authentication and integrity are enabled; and privacy 
       implies all of authentication, integrity and privacy are enabled.
+      hadoop.security.saslproperties.resolver.class can be used to override
+      the hadoop.rpc.protection for a connection at the server side.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.saslproperties.resolver.class</name>
+  <value></value>
+  <description>SaslPropertiesResolver used to resolve the QOP used for a 
+      connection. If not specified, the full set of values specified in 
+      hadoop.rpc.protection is used while determining the QOP used for the 
+      connection. If a class is specified, then the QOP values returned by 
+      the class will be used while determining the QOP used for the connection.
   </description>
 </property>
 
@@ -439,6 +452,11 @@
   <description>The AbstractFileSystem for file: uris.</description>
 </property>
 
+<property>
+  <name>fs.AbstractFileSystem.har.impl</name>
+  <value>org.apache.hadoop.fs.HarFs</value>
+  <description>The AbstractFileSystem for har: uris.</description>
+</property> 
 
 <property>
   <name>fs.AbstractFileSystem.hdfs.impl</name>
@@ -530,6 +548,31 @@
   <value>67108864</value>
   <description>Block size to use when reading files using the native S3
   filesystem (s3n: URIs).</description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.enabled</name>
+  <value>false</value>
+  <description>Setting this property to true enables multiple uploads to
+  native S3 filesystem. When uploading a file, it is split into blocks
+  if the size is larger than fs.s3n.multipart.uploads.block.size.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.block.size</name>
+  <value>67108864</value>
+  <description>The block size for multipart uploads to native S3 filesystem.
+  Default size is 64MB.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.copy.block.size</name>
+  <value>5368709120</value>
+  <description>The block size for multipart copy in native S3 filesystem.
+  Default size is 5GB.
+  </description>
 </property>
 
 <property>

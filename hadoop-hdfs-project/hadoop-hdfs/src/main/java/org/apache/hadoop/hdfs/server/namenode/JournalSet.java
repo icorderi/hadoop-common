@@ -89,10 +89,10 @@ public class JournalSet implements JournalManager {
       this.shared = shared;
     }
 
-    public void startLogSegment(long txId) throws IOException {
+    public void startLogSegment(long txId, int layoutVersion) throws IOException {
       Preconditions.checkState(stream == null);
       disabled = false;
-      stream = journal.startLogSegment(txId);
+      stream = journal.startLogSegment(txId, layoutVersion);
     }
 
     /**
@@ -177,7 +177,7 @@ public class JournalSet implements JournalManager {
   // COW implementation is necessary since some users (eg the web ui) call
   // getAllJournalStreams() and then iterate. Since this is rarely
   // mutated, there is no performance concern.
-  private List<JournalAndStream> journals =
+  private final List<JournalAndStream> journals =
       new CopyOnWriteArrayList<JournalSet.JournalAndStream>();
   final int minimumRedundantJournals;
   
@@ -200,11 +200,12 @@ public class JournalSet implements JournalManager {
 
   
   @Override
-  public EditLogOutputStream startLogSegment(final long txId) throws IOException {
+  public EditLogOutputStream startLogSegment(final long txId,
+      final int layoutVersion) throws IOException {
     mapJournalsAndReportErrors(new JournalClosure() {
       @Override
       public void apply(JournalAndStream jas) throws IOException {
-        jas.startLogSegment(txId);
+        jas.startLogSegment(txId, layoutVersion);
       }
     }, "starting log segment " + txId);
     return new JournalSetOutputStream();
@@ -433,12 +434,12 @@ public class JournalSet implements JournalManager {
     }
 
     @Override
-    public void create() throws IOException {
+    public void create(final int layoutVersion) throws IOException {
       mapJournalsAndReportErrors(new JournalClosure() {
         @Override
         public void apply(JournalAndStream jas) throws IOException {
           if (jas.isActive()) {
-            jas.getCurrentStream().create();
+            jas.getCurrentStream().create(layoutVersion);
           }
         }
       }, "create");
@@ -695,6 +696,12 @@ public class JournalSet implements JournalManager {
 
   @Override
   public void doRollback() throws IOException {
+    // This operation is handled by FSEditLog directly.
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void discardSegments(long startTxId) throws IOException {
     // This operation is handled by FSEditLog directly.
     throw new UnsupportedOperationException();
   }

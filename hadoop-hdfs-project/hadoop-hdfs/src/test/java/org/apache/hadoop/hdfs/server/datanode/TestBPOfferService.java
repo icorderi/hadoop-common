@@ -81,8 +81,8 @@ public class TestBPOfferService {
 
   private DatanodeProtocolClientSideTranslatorPB mockNN1;
   private DatanodeProtocolClientSideTranslatorPB mockNN2;
-  private NNHAStatusHeartbeat[] mockHaStatuses = new NNHAStatusHeartbeat[2];
-  private int heartbeatCounts[] = new int[2];
+  private final NNHAStatusHeartbeat[] mockHaStatuses = new NNHAStatusHeartbeat[2];
+  private final int[] heartbeatCounts = new int[2];
   private DataNode mockDn;
   private FsDatasetSpi<?> mockFSDataset;
   
@@ -153,7 +153,7 @@ public class TestBPOfferService {
     public HeartbeatResponse answer(InvocationOnMock invocation) throws Throwable {
       heartbeatCounts[nnIdx]++;
       return new HeartbeatResponse(new DatanodeCommand[0],
-          mockHaStatuses[nnIdx]);
+          mockHaStatuses[nnIdx], null);
     }
   }
 

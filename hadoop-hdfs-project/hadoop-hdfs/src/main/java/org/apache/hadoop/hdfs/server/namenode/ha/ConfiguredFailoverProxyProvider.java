@@ -116,10 +116,9 @@ public class ConfiguredFailoverProxyProvider<T> implements
   /**
    * Lazily initialize the RPC proxy object.
    */
-  @SuppressWarnings("unchecked")
   @Override
-  public synchronized T getProxy() {
-    AddressRpcProxyPair current = proxies.get(currentProxyIndex);
+  public synchronized ProxyInfo<T> getProxy() {
+    AddressRpcProxyPair<T> current = proxies.get(currentProxyIndex);
     if (current.namenode == null) {
       try {
         current.namenode = NameNodeProxies.createNonHAProxy(conf,
@@ -129,7 +128,7 @@ public class ConfiguredFailoverProxyProvider<T> implements
         throw new RuntimeException(e);
       }
     }
-    return (T)current.namenode;
+    return new ProxyInfo<T>(current.namenode, current.address.toString());
   }
 
   @Override
@@ -142,7 +141,7 @@ public class ConfiguredFailoverProxyProvider<T> implements
    * an NN. Note that {@link AddressRpcProxyPair#namenode} may be null.
    */
   private static class AddressRpcProxyPair<T> {
-    public InetSocketAddress address;
+    public final InetSocketAddress address;
     public T namenode;
     
     public AddressRpcProxyPair(InetSocketAddress address) {

@@ -317,7 +317,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
         // We need to additionally exclude the nodes that were added to the 
         // result list in the successful calls to choose*() above.
         for (DatanodeStorageInfo resultStorage : results) {
-          oldExcludedNodes.add(resultStorage.getDatanodeDescriptor());
+          addToExcludedNodes(resultStorage.getDatanodeDescriptor(), oldExcludedNodes);
         }
         // Set numOfReplicas, since it can get out of sync with the result list
         // if the NotEnoughReplicasException was thrown in chooseRandom().
@@ -605,7 +605,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
               + storageType);
       return false;
     }
-    if (storage.getState() == State.READ_ONLY) {
+    if (storage.getState() == State.READ_ONLY_SHARED) {
       logNodeIsNotChosen(storage, "storage is read-only");
       return false;
     }
@@ -633,9 +633,11 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     // check the communication traffic of the target machine
     if (considerLoad) {
       double avgLoad = 0;
-      int size = clusterMap.getNumOfLeaves();
-      if (size != 0 && stats != null) {
-        avgLoad = (double)stats.getTotalLoad()/size;
+      if (stats != null) {
+        int size = stats.getNumDatanodesInService();
+        if (size != 0) {
+          avgLoad = (double)stats.getTotalLoad()/size;
+        }
       }
       if (node.getXceiverCount() > (2.0 * avgLoad)) {
         logNodeIsNotChosen(storage, "the node is too busy ");

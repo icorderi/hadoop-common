@@ -18,17 +18,14 @@
 
 package org.apache.hadoop.hdfs.security.token.delegation;
 
-import java.io.DataInput;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.InterruptedIOException;
-import java.net.InetSocketAddress;
-import java.util.Iterator;
-
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.protobuf.ByteString;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.SecretManagerSection;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Phase;
@@ -45,6 +42,14 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
+
+import java.io.DataInput;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map.Entry;
 
 /**
  * A HDFS specific delegation token secret manager.
@@ -167,19 +172,81 @@ public class DelegationTokenSecretManager
     }
     serializerCompat.load(in);
   }
-  
-  /**
-   * Store the current state of the SecretManager for persistence
-   * 
-   * @param out Output stream for writing into fsimage.
-   * @param sdPath String storage directory path
-   * @throws IOException
-   */
-  public synchronized void saveSecretManagerStateCompat(DataOutputStream out,
-      String sdPath) throws IOException {
-    serializerCompat.save(out, sdPath);
+
+  public static class SecretManagerState {
+    public final SecretManagerSection section;
+    public final List<SecretManagerSection.DelegationKey> keys;
+    public final List<SecretManagerSection.PersistToken> tokens;
+
+    public SecretManagerState(
+        SecretManagerSection s,
+        List<SecretManagerSection.DelegationKey> keys,
+        List<SecretManagerSection.PersistToken> tokens) {
+      this.section = s;
+      this.keys = keys;
+      this.tokens = tokens;
+    }
   }
-  
+
+  public synchronized void loadSecretManagerState(SecretManagerState state)
+      throws IOException {
+    Preconditions.checkState(!running,
+        "Can't load state from image in a running SecretManager.");
+
+    currentId = state.section.getCurrentId();
+    delegationTokenSequenceNumber = state.section.getTokenSequenceNumber();
+    for (SecretManagerSection.DelegationKey k : state.keys) {
+      addKey(new DelegationKey(k.getId(), k.getExpiryDate(), k.hasKey() ? k
+          .getKey().toByteArray() : null));
+    }
+
+    for (SecretManagerSection.PersistToken t : state.tokens) {
+      DelegationTokenIdentifier id = new DelegationTokenIdentifier(new Text(
+          t.getOwner()), new Text(t.getRenewer()), new Text(t.getRealUser()));
+      id.setIssueDate(t.getIssueDate());
+      id.setMaxDate(t.getMaxDate());
+      id.setSequenceNumber(t.getSequenceNumber());
+      id.setMasterKeyId(t.getMasterKeyId());
+      addPersistedDelegationToken(id, t.getExpiryDate());
+    }
+  }
+
+  public synchronized SecretManagerState saveSecretManagerState() {
+    SecretManagerSection s = SecretManagerSection.newBuilder()
+        .setCurrentId(currentId)
+        .setTokenSequenceNumber(delegationTokenSequenceNumber)
+        .setNumKeys(allKeys.size()).setNumTokens(currentTokens.size()).build();
+    ArrayList<SecretManagerSection.DelegationKey> keys = Lists
+        .newArrayListWithCapacity(allKeys.size());
+    ArrayList<SecretManagerSection.PersistToken> tokens = Lists
+        .newArrayListWithCapacity(currentTokens.size());
+
+    for (DelegationKey v : allKeys.values()) {
+      SecretManagerSection.DelegationKey.Builder b = SecretManagerSection.DelegationKey
+          .newBuilder().setId(v.getKeyId()).setExpiryDate(v.getExpiryDate());
+      if (v.getEncodedKey() != null) {
+        b.setKey(ByteString.copyFrom(v.getEncodedKey()));
+      }
+      keys.add(b.build());
+    }
+
+    for (Entry<DelegationTokenIdentifier, DelegationTokenInformation> e : currentTokens
+        .entrySet()) {
+      DelegationTokenIdentifier id = e.getKey();
+      SecretManagerSection.PersistToken.Builder b = SecretManagerSection.PersistToken
+          .newBuilder().setOwner(id.getOwner().toString())
+          .setRenewer(id.getRenewer().toString())
+          .setRealUser(id.getRealUser().toString())
+          .setIssueDate(id.getIssueDate()).setMaxDate(id.getMaxDate())
+          .setSequenceNumber(id.getSequenceNumber())
+          .setMasterKeyId(id.getMasterKeyId())
+          .setExpiryDate(e.getValue().getRenewDate());
+      tokens.add(b.build());
+    }
+
+    return new SecretManagerState(s, keys, tokens);
+  }
+
   /**
    * This method is intended to be used only while reading edit logs.
    * 
@@ -232,7 +299,7 @@ public class DelegationTokenSecretManager
    * Update the token cache with renewal record in edit logs.
    * 
    * @param identifier DelegationTokenIdentifier of the renewed token
-   * @param expiryTime
+   * @param expiryTime expirty time in milliseconds
    * @throws IOException
    */
   public synchronized void updatePersistedTokenRenewal(
@@ -339,56 +406,6 @@ public class DelegationTokenSecretManager
       loadCurrentTokens(in);
     }
 
-    private void save(DataOutputStream out, String sdPath) throws IOException {
-      out.writeInt(currentId);
-      saveAllKeys(out, sdPath);
-      out.writeInt(delegationTokenSequenceNumber);
-      saveCurrentTokens(out, sdPath);
-    }
-
-    /**
-     * Private helper methods to save delegation keys and tokens in fsimage
-     */
-    private synchronized void saveCurrentTokens(DataOutputStream out,
-        String sdPath) throws IOException {
-      StartupProgress prog = NameNode.getStartupProgress();
-      Step step = new Step(StepType.DELEGATION_TOKENS, sdPath);
-      prog.beginStep(Phase.SAVING_CHECKPOINT, step);
-      prog.setTotal(Phase.SAVING_CHECKPOINT, step, currentTokens.size());
-      Counter counter = prog.getCounter(Phase.SAVING_CHECKPOINT, step);
-      out.writeInt(currentTokens.size());
-      Iterator<DelegationTokenIdentifier> iter = currentTokens.keySet()
-          .iterator();
-      while (iter.hasNext()) {
-        DelegationTokenIdentifier id = iter.next();
-        id.write(out);
-        DelegationTokenInformation info = currentTokens.get(id);
-        out.writeLong(info.getRenewDate());
-        counter.increment();
-      }
-      prog.endStep(Phase.SAVING_CHECKPOINT, step);
-    }
-
-    /*
-     * Save the current state of allKeys
-     */
-    private synchronized void saveAllKeys(DataOutputStream out, String sdPath)
-        throws IOException {
-      StartupProgress prog = NameNode.getStartupProgress();
-      Step step = new Step(StepType.DELEGATION_KEYS, sdPath);
-      prog.beginStep(Phase.SAVING_CHECKPOINT, step);
-      prog.setTotal(Phase.SAVING_CHECKPOINT, step, currentTokens.size());
-      Counter counter = prog.getCounter(Phase.SAVING_CHECKPOINT, step);
-      out.writeInt(allKeys.size());
-      Iterator<Integer> iter = allKeys.keySet().iterator();
-      while (iter.hasNext()) {
-        Integer key = iter.next();
-        allKeys.get(key).write(out);
-        counter.increment();
-      }
-      prog.endStep(Phase.SAVING_CHECKPOINT, step);
-    }
-
     /**
      * Private helper methods to load Delegation tokens from fsimage
      */
@@ -412,8 +429,7 @@ public class DelegationTokenSecretManager
 
     /**
      * Private helper method to load delegation keys from fsimage.
-     * @param in
-     * @throws IOException
+     * @throws IOException on error
      */
     private synchronized void loadAllKeys(DataInput in) throws IOException {
       StartupProgress prog = NameNode.getStartupProgress();
@@ -431,4 +447,5 @@ public class DelegationTokenSecretManager
       prog.endStep(Phase.LOADING_FSIMAGE, step);
     }
   }
+
 }

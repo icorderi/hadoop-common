@@ -22,33 +22,34 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import java.io.*;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableComparable;
-import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.lib.IdentityReducer;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.mapreduce.v2.MiniMRYarnCluster;
+import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.util.Shell;
-import org.apache.hadoop.yarn.util.Apps;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 /**
  * Class to test mapred task's 
@@ -253,6 +254,19 @@ public class TestMiniMRChildTask {
       checkEnv("NEW_PATH", File.pathSeparator + "/tmp", "noappend");
       // check if X=$(tt's X var):/tmp for an old env variable inherited from 
       // the tt
+      if (Shell.WINDOWS) {
+        // On Windows, PATH is replaced one more time as part of default config
+        // of "mapreduce.admin.user.env", i.e. on Windows,
+        // "mapreduce.admin.user.env" is set to
+        // "PATH=%PATH%;%HADOOP_COMMON_HOME%\\bin"
+        String hadoopHome = System.getenv("HADOOP_COMMON_HOME");
+        if (hadoopHome == null) {
+          hadoopHome = "";
+        }
+        String hadoopLibLocation = hadoopHome + "\\bin";
+        path += File.pathSeparator + hadoopLibLocation;
+        path += File.pathSeparator + path;
+      }
       checkEnv("PATH",  path + File.pathSeparator + "/tmp", "noappend");
 
       String jobLocalDir = job.get(MRJobConfig.JOB_LOCAL_DIR);
@@ -307,6 +321,19 @@ public class TestMiniMRChildTask {
       checkEnv("NEW_PATH", File.pathSeparator + "/tmp", "noappend");
       // check if X=$(tt's X var):/tmp for an old env variable inherited from 
       // the tt
+      if (Shell.WINDOWS) {
+        // On Windows, PATH is replaced one more time as part of default config
+        // of "mapreduce.admin.user.env", i.e. on Windows,
+        // "mapreduce.admin.user.env"
+        // is set to "PATH=%PATH%;%HADOOP_COMMON_HOME%\\bin"
+        String hadoopHome = System.getenv("HADOOP_COMMON_HOME");
+        if (hadoopHome == null) {
+          hadoopHome = "";
+        }
+        String hadoopLibLocation = hadoopHome + "\\bin";
+        path += File.pathSeparator + hadoopLibLocation;
+        path += File.pathSeparator + path;
+      }
       checkEnv("PATH",  path + File.pathSeparator + "/tmp", "noappend");
 
     }
@@ -323,7 +350,7 @@ public class TestMiniMRChildTask {
   @BeforeClass
   public static void setup() throws IOException {
     // create configuration, dfs, file system and mapred cluster 
-    dfs = new MiniDFSCluster(conf, 1, true, null);
+    dfs = new MiniDFSCluster.Builder(conf).build();
     fileSys = dfs.getFileSystem();
 
     if (!(new File(MiniMRYarnCluster.APPJAR)).exists()) {
@@ -410,12 +437,12 @@ public class TestMiniMRChildTask {
       String setupHadoopHomeCommand = Shell.WINDOWS ? 
           "HADOOP_COMMON_HOME=C:\\fake\\PATH\\to\\hadoop\\common\\home" :
           "HADOOP_COMMON_HOME=/fake/path/to/hadoop/common/home";
-      Apps.setEnvFromInputString(environment, setupHadoopHomeCommand);
-            
+      MRApps.setEnvFromInputString(environment, setupHadoopHomeCommand, conf);
+
       // Add the env variables passed by the admin
-      Apps.setEnvFromInputString(environment, conf.get(
+      MRApps.setEnvFromInputString(environment, conf.get(
           MRJobConfig.MAPRED_ADMIN_USER_ENV,
-          MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV));
+          MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV), conf);
       
       String executionPaths = environment.get(
           Shell.WINDOWS ? "PATH" : "LD_LIBRARY_PATH");

@@ -32,7 +32,6 @@ import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.server.common.JspHelper;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
-import org.apache.hadoop.hdfs.web.AuthFilter;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.resources.Param;
 import org.apache.hadoop.hdfs.web.resources.UserParam;
@@ -53,7 +52,7 @@ public class NameNodeHttpServer {
   
   private InetSocketAddress httpAddress;
   private InetSocketAddress httpsAddress;
-  private InetSocketAddress bindAddress;
+  private final InetSocketAddress bindAddress;
   
   public static final String NAMENODE_ADDRESS_ATTRIBUTE_KEY = "name.node.address";
   public static final String FSIMAGE_ATTRIBUTE_KEY = "name.system.image";
@@ -70,21 +69,27 @@ public class NameNodeHttpServer {
   private void initWebHdfs(Configuration conf) throws IOException {
     if (WebHdfsFileSystem.isEnabled(conf, HttpServer2.LOG)) {
       // set user pattern based on configuration file
-      UserParam.setUserPattern(conf.get(DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY, DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
+      UserParam.setUserPattern(conf.get(
+          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
+          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
 
-      // add SPNEGO authentication filter for webhdfs
-      final String name = "SPNEGO";
-      final String classname = AuthFilter.class.getName();
+      // add authentication filter for webhdfs
+      final String className = conf.get(
+          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_KEY,
+          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_DEFAULT);
+      final String name = className;
+
       final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
       Map<String, String> params = getAuthFilterParams(conf);
-      HttpServer2.defineFilter(httpServer.getWebAppContext(), name, classname, params,
-          new String[]{pathSpec});
-      HttpServer2.LOG.info("Added filter '" + name + "' (class=" + classname + ")");
+      HttpServer2.defineFilter(httpServer.getWebAppContext(), name, className,
+          params, new String[] { pathSpec });
+      HttpServer2.LOG.info("Added filter '" + name + "' (class=" + className
+          + ")");
 
       // add webhdfs packages
-      httpServer.addJerseyResourcePackage(
-          NamenodeWebHdfsMethods.class.getPackage().getName()
-              + ";" + Param.class.getPackage().getName(), pathSpec);
+      httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
+          .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+          pathSpec);
     }
   }
 
@@ -103,9 +108,19 @@ public class NameNodeHttpServer {
         DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_DEFAULT);
     InetSocketAddress httpsAddr = NetUtils.createSocketAddr(httpsAddrString);
 
+    if (httpsAddr != null) {
+      // If DFS_NAMENODE_HTTPS_BIND_HOST_KEY exists then it overrides the
+      // host name portion of DFS_NAMENODE_HTTPS_ADDRESS_KEY.
+      final String bindHost =
+          conf.getTrimmed(DFSConfigKeys.DFS_NAMENODE_HTTPS_BIND_HOST_KEY);
+      if (bindHost != null && !bindHost.isEmpty()) {
+        httpsAddr = new InetSocketAddress(bindHost, httpsAddr.getPort());
+      }
+    }
+
     HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
         httpAddr, httpsAddr, "hdfs",
-        DFSConfigKeys.DFS_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY,
+        DFSConfigKeys.DFS_NAMENODE_KERBEROS_INTERNAL_SPNEGO_PRINCIPAL_KEY,
         DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY);
 
     httpServer = builder.build();
@@ -169,6 +184,13 @@ public class NameNodeHttpServer {
           DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_KEYTAB_KEY +
           "' is not set.");
     }
+    String anonymousAllowed = conf
+      .get(DFSConfigKeys.DFS_WEB_AUTHENTICATION_SIMPLE_ANONYMOUS_ALLOWED);
+    if (anonymousAllowed != null && !anonymousAllowed.isEmpty()) {
+    params.put(
+        DFSConfigKeys.DFS_WEB_AUTHENTICATION_SIMPLE_ANONYMOUS_ALLOWED,
+        anonymousAllowed);
+    }
     return params;
   }
 
@@ -217,27 +239,10 @@ public class NameNodeHttpServer {
   private static void setupServlets(HttpServer2 httpServer, Configuration conf) {
     httpServer.addInternalServlet("startupProgress",
         StartupProgressServlet.PATH_SPEC, StartupProgressServlet.class);
-    httpServer.addInternalServlet("getDelegationToken",
-        GetDelegationTokenServlet.PATH_SPEC, 
-        GetDelegationTokenServlet.class, true);
-    httpServer.addInternalServlet("renewDelegationToken", 
-        RenewDelegationTokenServlet.PATH_SPEC, 
-        RenewDelegationTokenServlet.class, true);
-    httpServer.addInternalServlet("cancelDelegationToken", 
-        CancelDelegationTokenServlet.PATH_SPEC, 
-        CancelDelegationTokenServlet.class, true);
     httpServer.addInternalServlet("fsck", "/fsck", FsckServlet.class,
         true);
-    httpServer.addInternalServlet("getimage", "/getimage",
-        GetImageServlet.class, true);
-    httpServer.addInternalServlet("listPaths", "/listPaths/*",
-        ListPathsServlet.class, false);
-    httpServer.addInternalServlet("data", "/data/*",
-        FileDataServlet.class, false);
-    httpServer.addInternalServlet("checksum", "/fileChecksum/*",
-        FileChecksumServlets.RedirectServlet.class, false);
-    httpServer.addInternalServlet("contentSummary", "/contentSummary/*",
-        ContentSummaryServlet.class, false);
+    httpServer.addInternalServlet("imagetransfer", ImageServlet.PATH_SPEC,
+        ImageServlet.class, true);
   }
 
   static FSImage getFsImageFromContext(ServletContext context) {

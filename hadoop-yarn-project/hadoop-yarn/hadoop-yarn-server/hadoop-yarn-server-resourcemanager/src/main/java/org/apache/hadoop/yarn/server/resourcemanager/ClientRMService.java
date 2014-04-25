@@ -19,10 +19,12 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.security.AccessControlException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
@@ -44,8 +46,13 @@ import org.apache.hadoop.security.authorize.PolicyProvider;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.ApplicationsRequestScope;
 import org.apache.hadoop.yarn.api.protocolrecords.CancelDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.CancelDelegationTokenResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
@@ -54,6 +61,10 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationRequest;
@@ -72,9 +83,12 @@ import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.QueueACL;
@@ -83,7 +97,9 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
@@ -94,7 +110,12 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger.AuditConstant
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMoveEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
@@ -103,6 +124,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicy
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.SettableFuture;
 
 
 /**
@@ -163,7 +188,14 @@ public class ClientRMService extends AbstractService implements
     if (conf.getBoolean(
         CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION, 
         false)) {
-      refreshServiceAcls(conf, new RMPolicyProvider());
+      InputStream inputStream =
+          this.rmContext.getConfigurationProvider()
+              .getConfigurationInputStream(conf,
+                  YarnConfiguration.HADOOP_POLICY_CONFIGURATION_FILE);
+      if (inputStream != null) {
+        conf.addResource(inputStream);
+      }
+      refreshServiceAcls(conf, RMPolicyProvider.getInstance());
     }
     
     this.server.start();
@@ -267,6 +299,189 @@ public class ClientRMService extends AbstractService implements
   }
 
   @Override
+  public GetApplicationAttemptReportResponse getApplicationAttemptReport(
+      GetApplicationAttemptReportRequest request) throws YarnException,
+      IOException {
+    ApplicationAttemptId appAttemptId = request.getApplicationAttemptId();
+    UserGroupInformation callerUGI;
+    try {
+      callerUGI = UserGroupInformation.getCurrentUser();
+    } catch (IOException ie) {
+      LOG.info("Error getting UGI ", ie);
+      throw RPCUtil.getRemoteException(ie);
+    }
+    RMApp application = this.rmContext.getRMApps().get(
+        appAttemptId.getApplicationId());
+    if (application == null) {
+      // If the RM doesn't have the application, throw
+      // ApplicationNotFoundException and let client to handle.
+      throw new ApplicationNotFoundException("Application with id '"
+          + request.getApplicationAttemptId().getApplicationId()
+          + "' doesn't exist in RM.");
+    }
+
+    boolean allowAccess = checkAccess(callerUGI, application.getUser(),
+        ApplicationAccessType.VIEW_APP, application);
+    GetApplicationAttemptReportResponse response = null;
+    if (allowAccess) {
+      RMAppAttempt appAttempt = application.getAppAttempts().get(appAttemptId);
+      if (appAttempt == null) {
+        throw new ApplicationAttemptNotFoundException("ApplicationAttempt "
+            + appAttemptId + " Not Found in RM");
+      }
+      ApplicationAttemptReport attemptReport = appAttempt
+          .createApplicationAttemptReport();
+      response = GetApplicationAttemptReportResponse.newInstance(attemptReport);
+    }else{
+      throw new YarnException("User " + callerUGI.getShortUserName()
+          + " does not have privilage to see this attempt " + appAttemptId);
+    }
+    return response;
+  }
+  
+  @Override
+  public GetApplicationAttemptsResponse getApplicationAttempts(
+      GetApplicationAttemptsRequest request) throws YarnException, IOException {
+    ApplicationId appId = request.getApplicationId();
+    UserGroupInformation callerUGI;
+    try {
+      callerUGI = UserGroupInformation.getCurrentUser();
+    } catch (IOException ie) {
+      LOG.info("Error getting UGI ", ie);
+      throw RPCUtil.getRemoteException(ie);
+    }
+    RMApp application = this.rmContext.getRMApps().get(appId);
+    if (application == null) {
+      // If the RM doesn't have the application, throw
+      // ApplicationNotFoundException and let client to handle.
+      throw new ApplicationNotFoundException("Application with id '" + appId
+          + "' doesn't exist in RM.");
+    }
+    boolean allowAccess = checkAccess(callerUGI, application.getUser(),
+        ApplicationAccessType.VIEW_APP, application);
+    GetApplicationAttemptsResponse response = null;
+    if (allowAccess) {
+      Map<ApplicationAttemptId, RMAppAttempt> attempts = application
+          .getAppAttempts();
+      List<ApplicationAttemptReport> listAttempts = 
+        new ArrayList<ApplicationAttemptReport>();
+      Iterator<Map.Entry<ApplicationAttemptId, RMAppAttempt>> iter = attempts
+          .entrySet().iterator();
+      while (iter.hasNext()) {
+        listAttempts.add(iter.next().getValue()
+            .createApplicationAttemptReport());
+      }
+      response = GetApplicationAttemptsResponse.newInstance(listAttempts);
+    } else {
+      throw new YarnException("User " + callerUGI.getShortUserName()
+          + " does not have privilage to see this aplication " + appId);
+    }
+    return response;
+  }
+  
+  /*
+   * (non-Javadoc)
+   * 
+   * we're going to fix the issue of showing non-running containers of the
+   * running application in YARN-1794
+   */
+  @Override
+  public GetContainerReportResponse getContainerReport(
+      GetContainerReportRequest request) throws YarnException, IOException {
+    ContainerId containerId = request.getContainerId();
+    ApplicationAttemptId appAttemptId = containerId.getApplicationAttemptId();
+    ApplicationId appId = appAttemptId.getApplicationId();
+    UserGroupInformation callerUGI;
+    try {
+      callerUGI = UserGroupInformation.getCurrentUser();
+    } catch (IOException ie) {
+      LOG.info("Error getting UGI ", ie);
+      throw RPCUtil.getRemoteException(ie);
+    }
+    RMApp application = this.rmContext.getRMApps().get(appId);
+    if (application == null) {
+      // If the RM doesn't have the application, throw
+      // ApplicationNotFoundException and let client to handle.
+      throw new ApplicationNotFoundException("Application with id '" + appId
+          + "' doesn't exist in RM.");
+    }
+    boolean allowAccess = checkAccess(callerUGI, application.getUser(),
+        ApplicationAccessType.VIEW_APP, application);
+    GetContainerReportResponse response = null;
+    if (allowAccess) {
+      RMAppAttempt appAttempt = application.getAppAttempts().get(appAttemptId);
+      if (appAttempt == null) {
+        throw new ApplicationAttemptNotFoundException("ApplicationAttempt "
+            + appAttemptId + " Not Found in RM");
+      }
+      RMContainer rmConatiner = this.rmContext.getScheduler().getRMContainer(
+          containerId);
+      if (rmConatiner == null) {
+        throw new ContainerNotFoundException("Container with id " + containerId
+            + " not found");
+      }
+      response = GetContainerReportResponse.newInstance(rmConatiner
+          .createContainerReport());
+    } else {
+      throw new YarnException("User " + callerUGI.getShortUserName()
+          + " does not have privilage to see this aplication " + appId);
+    }
+    return response;
+  }
+  
+  /*
+   * (non-Javadoc)
+   * 
+   * we're going to fix the issue of showing non-running containers of the
+   * running application in YARN-1794"
+   */
+  @Override
+  public GetContainersResponse getContainers(GetContainersRequest request)
+      throws YarnException, IOException {
+    ApplicationAttemptId appAttemptId = request.getApplicationAttemptId();
+    ApplicationId appId = appAttemptId.getApplicationId();
+    UserGroupInformation callerUGI;
+    try {
+      callerUGI = UserGroupInformation.getCurrentUser();
+    } catch (IOException ie) {
+      LOG.info("Error getting UGI ", ie);
+      throw RPCUtil.getRemoteException(ie);
+    }
+    RMApp application = this.rmContext.getRMApps().get(appId);
+    if (application == null) {
+      // If the RM doesn't have the application, throw
+      // ApplicationNotFoundException and let client to handle.
+      throw new ApplicationNotFoundException("Application with id '" + appId
+          + "' doesn't exist in RM.");
+    }
+    boolean allowAccess = checkAccess(callerUGI, application.getUser(),
+        ApplicationAccessType.VIEW_APP, application);
+    GetContainersResponse response = null;
+    if (allowAccess) {
+      RMAppAttempt appAttempt = application.getAppAttempts().get(appAttemptId);
+      if (appAttempt == null) {
+        throw new ApplicationAttemptNotFoundException("ApplicationAttempt "
+            + appAttemptId + " Not Found in RM");
+      }
+      Collection<RMContainer> rmContainers = Collections.emptyList();
+      SchedulerAppReport schedulerAppReport =
+          this.rmContext.getScheduler().getSchedulerAppInfo(appAttemptId);
+      if (schedulerAppReport != null) {
+        rmContainers = schedulerAppReport.getLiveContainers();
+      }
+      List<ContainerReport> listContainers = new ArrayList<ContainerReport>();
+      for (RMContainer rmContainer : rmContainers) {
+        listContainers.add(rmContainer.createContainerReport());
+      }
+      response = GetContainersResponse.newInstance(listContainers);
+    } else {
+      throw new YarnException("User " + callerUGI.getShortUserName()
+          + " does not have privilage to see this aplication " + appId);
+    }
+    return response;
+  }
+
+  @Override
   public SubmitApplicationResponse submitApplication(
       SubmitApplicationRequest request) throws YarnException {
     ApplicationSubmissionContext submissionContext = request
@@ -290,16 +505,11 @@ public class ClientRMService extends AbstractService implements
       throw RPCUtil.getRemoteException(ie);
     }
 
-    // Though duplication will checked again when app is put into rmContext,
-    // but it is good to fail the invalid submission as early as possible.
+    // Check whether app has already been put into rmContext,
+    // If it is, simply return the response
     if (rmContext.getRMApps().get(applicationId) != null) {
-      String message = "Application with id " + applicationId +
-          " is already present! Cannot add a duplicate!";
-      LOG.warn(message);
-      RMAuditLogger.logFailure(user, AuditConstants.SUBMIT_APP_REQUEST,
-          message, "ClientRMService", "Exception in submitting application",
-          applicationId);
-      throw RPCUtil.getRemoteException(message);
+      LOG.info("This is an earlier submitted application: " + applicationId);
+      return SubmitApplicationResponse.newInstance();
     }
 
     if (submissionContext.getQueue() == null) {
@@ -323,7 +533,7 @@ public class ClientRMService extends AbstractService implements
     try {
       // call RMAppManager to submit application directly
       rmAppManager.submitApplication(submissionContext,
-          System.currentTimeMillis(), user, false, null);
+          System.currentTimeMillis(), user);
 
       LOG.info("Application with id " + applicationId.getId() + 
           " submitted by user " + user);
@@ -382,15 +592,18 @@ public class ClientRMService extends AbstractService implements
           + ApplicationAccessType.MODIFY_APP.name() + " on " + applicationId));
     }
 
-    if (application.isAppSafeToTerminate()) {
+    if (application.isAppFinalStateStored()) {
       RMAuditLogger.logSuccess(callerUGI.getShortUserName(),
-        AuditConstants.KILL_APP_REQUEST, "ClientRMService", applicationId);
+          AuditConstants.KILL_APP_REQUEST, "ClientRMService", applicationId);
       return KillApplicationResponse.newInstance(true);
-    } else {
-      this.rmContext.getDispatcher().getEventHandler()
-        .handle(new RMAppEvent(applicationId, RMAppEventType.KILL));
-      return KillApplicationResponse.newInstance(false);
     }
+
+    this.rmContext.getDispatcher().getEventHandler()
+        .handle(new RMAppEvent(applicationId, RMAppEventType.KILL));
+
+    // For UnmanagedAMs, return true so they don't retry
+    return KillApplicationResponse.newInstance(
+        application.getApplicationSubmissionContext().getUnmanagedAM());
   }
 
   @Override
@@ -433,9 +646,11 @@ public class ClientRMService extends AbstractService implements
         request.getApplicationStates();
     Set<String> users = request.getUsers();
     Set<String> queues = request.getQueues();
+    Set<String> tags = request.getApplicationTags();
     long limit = request.getLimit();
     LongRange start = request.getStartRange();
     LongRange finish = request.getFinishRange();
+    ApplicationsRequestScope scope = request.getScope();
 
     final Map<ApplicationId, RMApp> apps = rmContext.getRMApps();
     Iterator<RMApp> appsIter;
@@ -482,6 +697,17 @@ public class ClientRMService extends AbstractService implements
     List<ApplicationReport> reports = new ArrayList<ApplicationReport>();
     while (appsIter.hasNext() && reports.size() < limit) {
       RMApp application = appsIter.next();
+
+      // Check if current application falls under the specified scope
+      boolean allowAccess = checkAccess(callerUGI, application.getUser(),
+          ApplicationAccessType.VIEW_APP, application);
+      if (scope == ApplicationsRequestScope.OWN &&
+          !callerUGI.getUserName().equals(application.getUser())) {
+        continue;
+      } else if (scope == ApplicationsRequestScope.VIEWABLE && !allowAccess) {
+        continue;
+      }
+
       if (applicationTypes != null && !applicationTypes.isEmpty()) {
         String appTypeToMatch = caseSensitive
             ? application.getApplicationType()
@@ -511,8 +737,23 @@ public class ClientRMService extends AbstractService implements
         continue;
       }
 
-      boolean allowAccess = checkAccess(callerUGI, application.getUser(),
-          ApplicationAccessType.VIEW_APP, application);
+      if (tags != null && !tags.isEmpty()) {
+        Set<String> appTags = application.getApplicationTags();
+        if (appTags == null || appTags.isEmpty()) {
+          continue;
+        }
+        boolean match = false;
+        for (String tag : tags) {
+          if (appTags.contains(tag)) {
+            match = true;
+            break;
+          }
+        }
+        if (!match) {
+          continue;
+        }
+      }
+
       reports.add(application.createAndGetApplicationReport(
           callerUGI.getUserName(), allowAccess));
     }
@@ -686,10 +927,74 @@ public class ClientRMService extends AbstractService implements
     }
   }
   
+  @SuppressWarnings("unchecked")
   @Override
   public MoveApplicationAcrossQueuesResponse moveApplicationAcrossQueues(
       MoveApplicationAcrossQueuesRequest request) throws YarnException {
-    throw new UnsupportedOperationException("Move not yet supported");
+    ApplicationId applicationId = request.getApplicationId();
+
+    UserGroupInformation callerUGI;
+    try {
+      callerUGI = UserGroupInformation.getCurrentUser();
+    } catch (IOException ie) {
+      LOG.info("Error getting UGI ", ie);
+      RMAuditLogger.logFailure("UNKNOWN", AuditConstants.MOVE_APP_REQUEST,
+          "UNKNOWN", "ClientRMService" , "Error getting UGI",
+          applicationId);
+      throw RPCUtil.getRemoteException(ie);
+    }
+
+    RMApp application = this.rmContext.getRMApps().get(applicationId);
+    if (application == null) {
+      RMAuditLogger.logFailure(callerUGI.getUserName(),
+          AuditConstants.MOVE_APP_REQUEST, "UNKNOWN", "ClientRMService",
+          "Trying to move an absent application", applicationId);
+      throw new ApplicationNotFoundException("Trying to move an absent"
+          + " application " + applicationId);
+    }
+
+    if (!checkAccess(callerUGI, application.getUser(),
+        ApplicationAccessType.MODIFY_APP, application)) {
+      RMAuditLogger.logFailure(callerUGI.getShortUserName(),
+          AuditConstants.MOVE_APP_REQUEST,
+          "User doesn't have permissions to "
+              + ApplicationAccessType.MODIFY_APP.toString(), "ClientRMService",
+          AuditConstants.UNAUTHORIZED_USER, applicationId);
+      throw RPCUtil.getRemoteException(new AccessControlException("User "
+          + callerUGI.getShortUserName() + " cannot perform operation "
+          + ApplicationAccessType.MODIFY_APP.name() + " on " + applicationId));
+    }
+    
+    // Moves only allowed when app is in a state that means it is tracked by
+    // the scheduler
+    if (EnumSet.of(RMAppState.NEW, RMAppState.NEW_SAVING, RMAppState.FAILED,
+        RMAppState.FINAL_SAVING, RMAppState.FINISHING, RMAppState.FINISHED,
+        RMAppState.KILLED, RMAppState.KILLING, RMAppState.FAILED)
+        .contains(application.getState())) {
+      String msg = "App in " + application.getState() + " state cannot be moved.";
+      RMAuditLogger.logFailure(callerUGI.getShortUserName(),
+          AuditConstants.MOVE_APP_REQUEST, "UNKNOWN", "ClientRMService", msg);
+      throw new YarnException(msg);
+    }
+
+    SettableFuture<Object> future = SettableFuture.create();
+    this.rmContext.getDispatcher().getEventHandler().handle(
+        new RMAppMoveEvent(applicationId, request.getTargetQueue(), future));
+    
+    try {
+      Futures.get(future, YarnException.class);
+    } catch (YarnException ex) {
+      RMAuditLogger.logFailure(callerUGI.getShortUserName(),
+          AuditConstants.MOVE_APP_REQUEST, "UNKNOWN", "ClientRMService",
+          ex.getMessage());
+      throw ex;
+    }
+
+    RMAuditLogger.logSuccess(callerUGI.getShortUserName(), 
+        AuditConstants.MOVE_APP_REQUEST, "ClientRMService" , applicationId);
+    MoveApplicationAcrossQueuesResponse response = recordFactory
+        .newRecordInstance(MoveApplicationAcrossQueuesResponse.class);
+    return response;
   }
 
   private String getRenewerForToken(Token<RMDelegationTokenIdentifier> token)
@@ -704,7 +1009,8 @@ public class ClientRMService extends AbstractService implements
 
   void refreshServiceAcls(Configuration configuration, 
       PolicyProvider policyProvider) {
-    this.server.refreshServiceAcl(configuration, policyProvider);
+    this.server.refreshServiceAclWithLoadedConfiguration(configuration,
+        policyProvider);
   }
 
   private boolean isAllowedDelegationTokenOp() throws IOException {
@@ -717,5 +1023,10 @@ public class ClientRMService extends AbstractService implements
     } else {
       return true;
     }
+  }
+
+  @VisibleForTesting
+  public Server getServer() {
+    return this.server;
   }
 }

@@ -18,6 +18,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 
 import org.apache.commons.logging.Log;
@@ -30,6 +31,7 @@ import org.apache.hadoop.security.authorize.PolicyProvider;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.VersionUtil;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
@@ -65,6 +67,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicy
 import org.apache.hadoop.yarn.server.utils.YarnServerBuilderUtils;
 import org.apache.hadoop.yarn.util.RackResolver;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
+
+import com.google.common.annotations.VisibleForTesting;
 
 public class ResourceTrackerService extends AbstractService implements
     ResourceTracker {
@@ -161,7 +165,14 @@ public class ResourceTrackerService extends AbstractService implements
     if (conf.getBoolean(
         CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION, 
         false)) {
-      refreshServiceAcls(conf, new RMPolicyProvider());
+      InputStream inputStream =
+          this.rmContext.getConfigurationProvider()
+              .getConfigurationInputStream(conf,
+                  YarnConfiguration.HADOOP_POLICY_CONFIGURATION_FILE);
+      if (inputStream != null) {
+        conf.addResource(inputStream);
+      }
+      refreshServiceAcls(conf, RMPolicyProvider.getInstance());
     }
 
     this.server.start();
@@ -177,12 +188,51 @@ public class ResourceTrackerService extends AbstractService implements
     super.serviceStop();
   }
 
+  /**
+   * Helper method to handle received ContainerStatus. If this corresponds to
+   * the completion of a master-container of a managed AM,
+   * we call the handler for RMAppAttemptContainerFinishedEvent.
+   */
+  @SuppressWarnings("unchecked")
+  @VisibleForTesting
+  void handleContainerStatus(ContainerStatus containerStatus) {
+    ApplicationAttemptId appAttemptId =
+        containerStatus.getContainerId().getApplicationAttemptId();
+    RMApp rmApp =
+        rmContext.getRMApps().get(appAttemptId.getApplicationId());
+    if (rmApp == null) {
+      LOG.error("Received finished container : "
+          + containerStatus.getContainerId()
+          + "for unknown application " + appAttemptId.getApplicationId()
+          + " Skipping.");
+      return;
+    }
+
+    if (rmApp.getApplicationSubmissionContext().getUnmanagedAM()) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Ignoring container completion status for unmanaged AM"
+            + rmApp.getApplicationId());
+      }
+      return;
+    }
+
+    RMAppAttempt rmAppAttempt = rmApp.getRMAppAttempt(appAttemptId);
+    Container masterContainer = rmAppAttempt.getMasterContainer();
+    if (masterContainer.getId().equals(containerStatus.getContainerId())
+        && containerStatus.getState() == ContainerState.COMPLETE) {
+      // sending master container finished event.
+      RMAppAttemptContainerFinishedEvent evt =
+          new RMAppAttemptContainerFinishedEvent(appAttemptId,
+              containerStatus);
+      rmContext.getDispatcher().getEventHandler().handle(evt);
+    }
+  }
+
   @SuppressWarnings("unchecked")
   @Override
   public RegisterNodeManagerResponse registerNodeManager(
       RegisterNodeManagerRequest request) throws YarnException,
       IOException {
-
     NodeId nodeId = request.getNodeId();
     String host = nodeId.getHost();
     int cmPort = nodeId.getPort();
@@ -194,27 +244,7 @@ public class ResourceTrackerService extends AbstractService implements
       LOG.info("received container statuses on node manager register :"
           + request.getContainerStatuses());
       for (ContainerStatus containerStatus : request.getContainerStatuses()) {
-        ApplicationAttemptId appAttemptId =
-            containerStatus.getContainerId().getApplicationAttemptId();
-        RMApp rmApp =
-            rmContext.getRMApps().get(appAttemptId.getApplicationId());
-        if (rmApp != null) {
-          RMAppAttempt rmAppAttempt = rmApp.getRMAppAttempt(appAttemptId);
-          if (rmAppAttempt.getMasterContainer().getId()
-              .equals(containerStatus.getContainerId())
-              && containerStatus.getState() == ContainerState.COMPLETE) {
-            // sending master container finished event.
-            RMAppAttemptContainerFinishedEvent evt =
-                new RMAppAttemptContainerFinishedEvent(appAttemptId,
-                    containerStatus);
-            rmContext.getDispatcher().getEventHandler().handle(evt);
-          }
-        } else {
-          LOG.error("Received finished container :"
-              + containerStatus.getContainerId()
-              + " for non existing application :"
-              + appAttemptId.getApplicationId());
-        }
+        handleContainerStatus(containerStatus);
       }
     }
     RegisterNodeManagerResponse response = recordFactory
@@ -415,6 +445,12 @@ public class ResourceTrackerService extends AbstractService implements
 
   void refreshServiceAcls(Configuration configuration, 
       PolicyProvider policyProvider) {
-    this.server.refreshServiceAcl(configuration, policyProvider);
+    this.server.refreshServiceAclWithLoadedConfiguration(configuration,
+        policyProvider);
+  }
+
+  @VisibleForTesting
+  public Server getServer() {
+    return this.server;
   }
 }

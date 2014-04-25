@@ -24,6 +24,8 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_BASE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_MAX_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_MAX_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_RETRY_MAX_ATTEMPTS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_RETRY_MAX_ATTEMPTS_DEFAULT;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -73,6 +75,9 @@ import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolC
 import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolClientSideTranslatorPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolPB;
+import org.apache.hadoop.ipc.RefreshCallQueueProtocol;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolClientSideTranslatorPB;
 import org.apache.hadoop.tools.GetUserMappingsProtocol;
 import org.apache.hadoop.tools.protocolPB.GetUserMappingsProtocolClientSideTranslatorPB;
 import org.apache.hadoop.tools.protocolPB.GetUserMappingsProtocolPB;
@@ -144,9 +149,10 @@ public class NameNodeProxies {
           .createFailoverProxyProvider(conf, failoverProxyProviderClass, xface,
               nameNodeUri);
       Conf config = new Conf(conf);
-      T proxy = (T) RetryProxy.create(xface, failoverProxyProvider, RetryPolicies
-          .failoverOnNetworkException(RetryPolicies.TRY_ONCE_THEN_FAIL,
-              config.maxFailoverAttempts, config.failoverSleepBaseMillis,
+      T proxy = (T) RetryProxy.create(xface, failoverProxyProvider,
+          RetryPolicies.failoverOnNetworkException(
+              RetryPolicies.TRY_ONCE_THEN_FAIL, config.maxFailoverAttempts,
+              config.maxRetryAttempts, config.failoverSleepBaseMillis,
               config.failoverSleepMaxMillis));
       
       Text dtService = HAUtil.buildTokenServiceForLogicalUri(nameNodeUri);
@@ -192,11 +198,14 @@ public class NameNodeProxies {
       int maxFailoverAttempts = config.getInt(
           DFS_CLIENT_FAILOVER_MAX_ATTEMPTS_KEY,
           DFS_CLIENT_FAILOVER_MAX_ATTEMPTS_DEFAULT);
+      int maxRetryAttempts = config.getInt(
+          DFS_CLIENT_RETRY_MAX_ATTEMPTS_KEY,
+          DFS_CLIENT_RETRY_MAX_ATTEMPTS_DEFAULT);
       InvocationHandler dummyHandler = new LossyRetryInvocationHandler<T>(
               numResponseToDrop, failoverProxyProvider,
               RetryPolicies.failoverOnNetworkException(
-                  RetryPolicies.TRY_ONCE_THEN_FAIL, 
-                  Math.max(numResponseToDrop + 1, maxFailoverAttempts), delay, 
+                  RetryPolicies.TRY_ONCE_THEN_FAIL, maxFailoverAttempts, 
+                  Math.max(numResponseToDrop + 1, maxRetryAttempts), delay, 
                   maxCap));
       
       T proxy = (T) Proxy.newProxyInstance(
@@ -246,13 +255,16 @@ public class NameNodeProxies {
     } else if (xface == RefreshAuthorizationPolicyProtocol.class) {
       proxy = (T) createNNProxyWithRefreshAuthorizationPolicyProtocol(nnAddr,
           conf, ugi);
+    } else if (xface == RefreshCallQueueProtocol.class) {
+      proxy = (T) createNNProxyWithRefreshCallQueueProtocol(nnAddr, conf, ugi);
     } else {
-      String message = "Upsupported protocol found when creating the proxy " +
+      String message = "Unsupported protocol found when creating the proxy " +
           "connection to NameNode: " +
           ((xface != null) ? xface.getClass().getName() : "null");
       LOG.error(message);
       throw new IllegalStateException(message);
     }
+
     return new ProxyAndInfo<T>(proxy, dtService);
   }
   
@@ -278,6 +290,14 @@ public class NameNodeProxies {
     RefreshUserMappingsProtocolPB proxy = (RefreshUserMappingsProtocolPB)
         createNameNodeProxy(address, conf, ugi, RefreshUserMappingsProtocolPB.class, 0);
     return new RefreshUserMappingsProtocolClientSideTranslatorPB(proxy);
+  }
+
+  private static RefreshCallQueueProtocol
+      createNNProxyWithRefreshCallQueueProtocol(InetSocketAddress address,
+          Configuration conf, UserGroupInformation ugi) throws IOException {
+    RefreshCallQueueProtocolPB proxy = (RefreshCallQueueProtocolPB)
+        createNameNodeProxy(address, conf, ugi, RefreshCallQueueProtocolPB.class, 0);
+    return new RefreshCallQueueProtocolClientSideTranslatorPB(proxy);
   }
 
   private static GetUserMappingsProtocol createNNProxyWithGetUserMappingsProtocol(

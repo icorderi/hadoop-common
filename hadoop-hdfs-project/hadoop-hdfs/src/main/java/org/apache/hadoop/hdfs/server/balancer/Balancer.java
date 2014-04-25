@@ -190,6 +190,8 @@ public class Balancer {
    */
   public static final int MAX_NUM_CONCURRENT_MOVES = 5;
   private static final int MAX_NO_PENDING_BLOCK_ITERATIONS = 5;
+  public static final long DELAY_AFTER_ERROR = 10 * 1000L; //10 seconds
+  public static final int BLOCK_MOVE_READ_TIMEOUT=20*60*1000; // 20 minutes
   
   private static final String USAGE = "Usage: java "
       + Balancer.class.getSimpleName()
@@ -203,23 +205,23 @@ public class Balancer {
   private final double threshold;
   
   // all data node lists
-  private Collection<Source> overUtilizedDatanodes
+  private final Collection<Source> overUtilizedDatanodes
                                = new LinkedList<Source>();
-  private Collection<Source> aboveAvgUtilizedDatanodes
+  private final Collection<Source> aboveAvgUtilizedDatanodes
                                = new LinkedList<Source>();
-  private Collection<BalancerDatanode> belowAvgUtilizedDatanodes
+  private final Collection<BalancerDatanode> belowAvgUtilizedDatanodes
                                = new LinkedList<BalancerDatanode>();
-  private Collection<BalancerDatanode> underUtilizedDatanodes
+  private final Collection<BalancerDatanode> underUtilizedDatanodes
                                = new LinkedList<BalancerDatanode>();
   
-  private Collection<Source> sources
+  private final Collection<Source> sources
                                = new HashSet<Source>();
-  private Collection<BalancerDatanode> targets
+  private final Collection<BalancerDatanode> targets
                                = new HashSet<BalancerDatanode>();
   
-  private Map<Block, BalancerBlock> globalBlockList
+  private final Map<Block, BalancerBlock> globalBlockList
                  = new HashMap<Block, BalancerBlock>();
-  private MovedBlocks movedBlocks = new MovedBlocks();
+  private final MovedBlocks movedBlocks = new MovedBlocks();
   /** Map (datanodeUuid -> BalancerDatanodes) */
   private final Map<String, BalancerDatanode> datanodeMap
       = new HashMap<String, BalancerDatanode>();
@@ -337,7 +339,14 @@ public class Balancer {
         sock.connect(
             NetUtils.createSocketAddr(target.datanode.getXferAddr()),
             HdfsServerConstants.READ_TIMEOUT);
-        sock.setSoTimeout(HdfsServerConstants.READ_TIMEOUT);
+        /* Unfortunately we don't have a good way to know if the Datanode is
+         * taking a really long time to move a block, OR something has
+         * gone wrong and it's never going to finish. To deal with this 
+         * scenario, we set a long timeout (20 minutes) to avoid hanging
+         * the balancer indefinitely.
+         */
+        sock.setSoTimeout(BLOCK_MOVE_READ_TIMEOUT);
+
         sock.setKeepAlive(true);
         
         OutputStream unbufOut = sock.getOutputStream();
@@ -360,6 +369,13 @@ public class Balancer {
         LOG.info("Successfully moved " + this);
       } catch (IOException e) {
         LOG.warn("Failed to move " + this + ": " + e.getMessage());
+        /* proxy or target may have an issue, insert a small delay
+         * before using these nodes further. This avoids a potential storm
+         * of "threads quota exceeded" Warnings when the balancer
+         * gets out of sync with work going on in datanode.
+         */
+        proxySource.activateDelay(DELAY_AFTER_ERROR);
+        target.activateDelay(DELAY_AFTER_ERROR);
       } finally {
         IOUtils.closeStream(out);
         IOUtils.closeStream(in);
@@ -421,8 +437,8 @@ public class Balancer {
   
   /* A class for keeping track of blocks in the Balancer */
   static private class BalancerBlock {
-    private Block block; // the block
-    private List<BalancerDatanode> locations
+    private final Block block; // the block
+    private final List<BalancerDatanode> locations
             = new ArrayList<BalancerDatanode>(3); // its locations
     
     /* Constructor */
@@ -469,7 +485,7 @@ public class Balancer {
    * An object of this class is stored in a source node. 
    */
   static private class NodeTask {
-    private BalancerDatanode datanode; //target node
+    private final BalancerDatanode datanode; //target node
     private long size;  //bytes scheduled to move
     
     /* constructor */
@@ -497,8 +513,9 @@ public class Balancer {
     final double utilization;
     final long maxSize2Move;
     private long scheduledSize = 0L;
+    protected long delayUntil = 0L;
     //  blocks being moved but not confirmed yet
-    private List<PendingBlockMove> pendingBlocks = 
+    private final List<PendingBlockMove> pendingBlocks =
       new ArrayList<PendingBlockMove>(MAX_NUM_CONCURRENT_MOVES); 
     
     @Override
@@ -573,6 +590,18 @@ public class Balancer {
     protected synchronized void setScheduledSize(long size){
       scheduledSize = size;
     }
+
+    synchronized private void activateDelay(long delta) {
+      delayUntil = Time.now() + delta;
+    }
+
+    synchronized private boolean isDelayActive() {
+      if (delayUntil == 0 || Time.now() > delayUntil){
+        delayUntil = 0;
+        return false;
+      }
+        return true;
+    }
     
     /* Check if the node can schedule more blocks to move */
     synchronized private boolean isPendingQNotFull() {
@@ -590,7 +619,7 @@ public class Balancer {
     /* Add a scheduled block move to the node */
     private synchronized boolean addPendingBlock(
         PendingBlockMove pendingBlock) {
-      if (isPendingQNotFull()) {
+      if (!isDelayActive() && isPendingQNotFull()) {
         return pendingBlocks.add(pendingBlock);
       }
       return false;
@@ -615,13 +644,13 @@ public class Balancer {
       }
     }
     
-    private ArrayList<NodeTask> nodeTasks = new ArrayList<NodeTask>(2);
+    private final ArrayList<NodeTask> nodeTasks = new ArrayList<NodeTask>(2);
     private long blocksToReceive = 0L;
     /* source blocks point to balancerBlocks in the global list because
      * we want to keep one copy of a block in balancer and be aware that
      * the locations are changing over time.
      */
-    private List<BalancerBlock> srcBlockList
+    private final List<BalancerBlock> srcBlockList
             = new ArrayList<BalancerBlock>();
     
     /* constructor */
@@ -1092,7 +1121,7 @@ public class Balancer {
       return bytesMoved;
     }
   };
-  private BytesMoved bytesMoved = new BytesMoved();
+  private final BytesMoved bytesMoved = new BytesMoved();
   
   /* Start a thread to dispatch block moves for each source. 
    * The thread selects blocks to move & sends request to proxy source to

@@ -82,6 +82,15 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IPC_SERVER_HANDLER_QUEUE_SIZE_KEY */
   public static final int     IPC_SERVER_HANDLER_QUEUE_SIZE_DEFAULT = 100;
 
+  /**
+   * CallQueue related settings. These are not used directly, but rather
+   * combined with a namespace and port. For instance:
+   * IPC_CALLQUEUE_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
+   */
+  public static final String IPC_CALLQUEUE_NAMESPACE = "ipc";
+  public static final String IPC_CALLQUEUE_IMPL_KEY = "callqueue.impl";
+  public static final String IPC_CALLQUEUE_IDENTITY_PROVIDER_KEY = "identity-provider.impl";
+
   /** Internal buffer size for Lzo compressor/decompressors */
   public static final String  IO_COMPRESSION_CODEC_LZO_BUFFERSIZE_KEY =
     "io.compression.codec.lzo.buffersize";
@@ -189,6 +198,11 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String HA_FC_GRACEFUL_FENCE_CONNECTION_RETRIES =
       "ha.failover-controller.graceful-fence.connection.retries";
   public static final int HA_FC_GRACEFUL_FENCE_CONNECTION_RETRIES_DEFAULT = 1;
+
+  /** number of zookeeper operation retry times in ActiveStandbyElector */
+  public static final String HA_FC_ELECTOR_ZK_OP_RETRIES_KEY =
+      "ha.failover-controller.active-standby-elector.zk.op.retries";
+  public static final int HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT = 3;
 
   /* Timeout that the CLI (manual) FC waits for monitorHealth, getServiceState */
   public static final String HA_FC_CLI_CHECK_TIMEOUT_KEY =

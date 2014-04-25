@@ -172,6 +172,12 @@
     </Or>
     <Bug pattern="IS2_INCONSISTENT_SYNC" />
   </Match>
+  <!-- Inconsistent sync warning - scheduleAsynchronously is only initialized once and never changed -->
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler" />
+    <Field name="scheduleAsynchronously" />
+    <Bug pattern="IS2_INCONSISTENT_SYNC" />
+  </Match>
   <!-- Inconsistent sync warning - minimumAllocation is only initialized once and never changed -->
   <Match>
     <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler" />
@@ -308,5 +314,11 @@
   <Match>
     <Class name="org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore" />
     <Bug pattern="IS2_INCONSISTENT_SYNC" />
+  </Match>
+
+  <!-- Multithreaded correctness warnings need to be ignored here as this is for creating the singleton.-->
+  <Match>
+      <Class name="org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicyProvider"/>
+      <Bug pattern="DC_DOUBLECHECK" />
   </Match>
 </FindBugsFilter>

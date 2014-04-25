@@ -50,7 +50,6 @@ import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
-import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -77,10 +76,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt.ContainersAndNMTokensAllocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
@@ -106,7 +105,7 @@ import com.google.common.annotations.VisibleForTesting;
 @Evolving
 @SuppressWarnings("unchecked")
 public class FifoScheduler extends AbstractYarnScheduler implements
-    ResourceScheduler, Configurable {
+    Configurable {
 
   private static final Log LOG = LogFactory.getLog(FifoScheduler.class);
 
@@ -114,9 +113,6 @@ public class FifoScheduler extends AbstractYarnScheduler implements
     RecordFactoryProvider.getRecordFactory(null);
 
   Configuration conf;
-
-  private final static Container[] EMPTY_CONTAINER_ARRAY = new Container[] {};
-  private final static List<Container> EMPTY_CONTAINER_LIST = Arrays.asList(EMPTY_CONTAINER_ARRAY);
 
   protected Map<NodeId, FiCaSchedulerNode> nodes = new ConcurrentHashMap<NodeId, FiCaSchedulerNode>();
 
@@ -265,8 +261,7 @@ public class FifoScheduler extends AbstractYarnScheduler implements
     }
   }
 
-  private static final Allocation EMPTY_ALLOCATION = 
-      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0));
+
   @Override
   public Allocation allocate(
       ApplicationAttemptId applicationAttemptId, List<ResourceRequest> ask,
@@ -329,10 +324,11 @@ public class FifoScheduler extends AbstractYarnScheduler implements
       }
 
       application.updateBlacklist(blacklistAdditions, blacklistRemovals);
-
-      return new Allocation(
-          application.pullNewlyAllocatedContainers(), 
-          application.getHeadroom());
+      ContainersAndNMTokensAllocation allocation =
+          application.pullNewlyAllocatedContainersAndNMTokens();
+      return new Allocation(allocation.getContainerList(),
+        application.getHeadroom(), null, null, null,
+        allocation.getNMTokenList());
     }
   }
 
@@ -507,9 +503,13 @@ public class FifoScheduler extends AbstractYarnScheduler implements
 
   private int getMaxAllocatableContainers(FiCaSchedulerApp application,
       Priority priority, FiCaSchedulerNode node, NodeType type) {
+    int maxContainers = 0;
+    
     ResourceRequest offSwitchRequest = 
       application.getResourceRequest(priority, ResourceRequest.ANY);
-    int maxContainers = offSwitchRequest.getNumContainers();
+    if (offSwitchRequest != null) {
+      maxContainers = offSwitchRequest.getNumContainers();
+    }
 
     if (type == NodeType.OFF_SWITCH) {
       return maxContainers;
@@ -655,20 +655,11 @@ public class FifoScheduler extends AbstractYarnScheduler implements
         NodeId nodeId = node.getRMNode().getNodeID();
         ContainerId containerId = BuilderUtils.newContainerId(application
             .getApplicationAttemptId(), application.getNewContainerId());
-        Token containerToken = null;
-
-        containerToken =
-            this.rmContext.getContainerTokenSecretManager()
-              .createContainerToken(containerId, nodeId, application.getUser(),
-                capability);
-        if (containerToken == null) {
-          return i; // Try again later.
-        }
 
         // Create the container
         Container container =
             BuilderUtils.newContainer(containerId, nodeId, node.getRMNode()
-              .getHttpAddress(), capability, priority, containerToken);
+              .getHttpAddress(), capability, priority, null);
         
         // Allocate!
         

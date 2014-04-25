@@ -62,8 +62,8 @@ public class TestSecurityTokenEditLog {
   // an object that does a bunch of transactions
   //
   static class Transactions implements Runnable {
-    FSNamesystem namesystem;
-    int numTransactions;
+    final FSNamesystem namesystem;
+    final int numTransactions;
     short replication = 3;
     long blockSize = 64;
 
@@ -158,7 +158,7 @@ public class TestSecurityTokenEditLog {
         
         FSEditLogLoader loader = new FSEditLogLoader(namesystem, 0);        
         long numEdits = loader.loadFSEdits(
-            new EditLogFileInputStream(editFile), 1, null);
+            new EditLogFileInputStream(editFile), 1);
         assertEquals("Verification for " + editFile, expectedTransactions, numEdits);
       }
     } finally {
@@ -191,9 +191,9 @@ public class TestSecurityTokenEditLog {
       Token<DelegationTokenIdentifier> token1 = fsn.getDelegationToken(renewer);
       Token<DelegationTokenIdentifier> token2 = fsn.getDelegationToken(renewer);
       DelegationTokenIdentifier ident1 =
-          (DelegationTokenIdentifier)token1.decodeIdentifier();
+          token1.decodeIdentifier();
       DelegationTokenIdentifier ident2 =
-          (DelegationTokenIdentifier)token2.decodeIdentifier();
+          token2.decodeIdentifier();
       
       // verify we got the tokens
       verify(log, times(1)).logGetDelegationToken(eq(ident1), anyLong());

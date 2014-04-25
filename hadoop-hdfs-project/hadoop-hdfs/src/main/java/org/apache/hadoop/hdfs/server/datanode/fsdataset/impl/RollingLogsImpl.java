@@ -46,7 +46,7 @@ class RollingLogsImpl implements RollingLogs {
   private final File prev;
   private PrintWriter out; //require synchronized access
 
-  private Appender appender = new Appender() {
+  private final Appender appender = new Appender() {
     @Override
     public Appendable append(CharSequence csq) {
       synchronized(RollingLogsImpl.this) {
@@ -55,6 +55,7 @@ class RollingLogsImpl implements RollingLogs {
               + " is not yet opened.");
         }
         out.print(csq);
+        out.flush();
       }
       return this;
     }
@@ -187,11 +188,9 @@ class RollingLogsImpl implements RollingLogs {
         if (reader != null && (line = reader.readLine()) != null) {
           return;
         }
-        if (line == null) {
-          // move to the next file.
-          if (openFile()) {
-            readNext();
-          }
+        // move to the next file.
+        if (openFile()) {
+          readNext();
         }
       } finally {
         if (!hasNext()) {

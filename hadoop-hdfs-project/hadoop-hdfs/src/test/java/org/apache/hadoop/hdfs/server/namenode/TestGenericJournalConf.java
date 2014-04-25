@@ -160,7 +160,8 @@ public class TestGenericJournalConf {
     }
     
     @Override
-    public EditLogOutputStream startLogSegment(long txId) throws IOException {
+    public EditLogOutputStream startLogSegment(long txId, int layoutVersion)
+        throws IOException {
       return mock(EditLogOutputStream.class);
     }
     
@@ -211,6 +212,9 @@ public class TestGenericJournalConf {
 
     @Override
     public void doRollback() throws IOException {}
+
+    @Override
+    public void discardSegments(long startTxId) throws IOException {}
 
     @Override
     public long getJournalCTime() throws IOException {

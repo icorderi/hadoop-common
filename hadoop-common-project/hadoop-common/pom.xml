@@ -202,7 +202,7 @@
     <dependency>
       <groupId>org.apache.ant</groupId>
       <artifactId>ant</artifactId>
-      <scope>provided</scope>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
@@ -337,6 +337,7 @@
                   <include>GetUserMappingsProtocol.proto</include>
                   <include>RefreshAuthorizationPolicyProtocol.proto</include>
                   <include>RefreshUserMappingsProtocol.proto</include>
+                  <include>RefreshCallQueueProtocol.proto</include>
                 </includes>
               </source>
               <output>${project.build.directory}/generated-sources/java</output>
@@ -482,6 +483,7 @@
             <exclude>src/test/resources/test.har/_index</exclude>
             <exclude>src/test/resources/test.har/_masterindex</exclude>
             <exclude>src/test/resources/test.har/part-0</exclude>
+            <exclude>src/test/resources/javakeystoreprovider.password</exclude>
           </excludes>
         </configuration>
       </plugin>
@@ -543,6 +545,7 @@
                     <javahClassName>org.apache.hadoop.io.compress.bzip2.Bzip2Decompressor</javahClassName>
                     <javahClassName>org.apache.hadoop.security.JniBasedUnixGroupsMapping</javahClassName>
                     <javahClassName>org.apache.hadoop.io.nativeio.NativeIO</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.nativeio.SharedFileDescriptorFactory</javahClassName>
                     <javahClassName>org.apache.hadoop.security.JniBasedUnixGroupsNetgroupMapping</javahClassName>
                     <javahClassName>org.apache.hadoop.io.compress.snappy.SnappyCompressor</javahClassName>
                     <javahClassName>org.apache.hadoop.io.compress.snappy.SnappyDecompressor</javahClassName>
@@ -550,6 +553,7 @@
                     <javahClassName>org.apache.hadoop.io.compress.lz4.Lz4Decompressor</javahClassName>
                     <javahClassName>org.apache.hadoop.util.NativeCrc32</javahClassName>
                     <javahClassName>org.apache.hadoop.net.unix.DomainSocket</javahClassName>
+                    <javahClassName>org.apache.hadoop.net.unix.DomainSocketWatcher</javahClassName>
                   </javahClassNames>
                   <javahOutputDirectory>${project.build.directory}/native/javah</javahOutputDirectory>
                 </configuration>

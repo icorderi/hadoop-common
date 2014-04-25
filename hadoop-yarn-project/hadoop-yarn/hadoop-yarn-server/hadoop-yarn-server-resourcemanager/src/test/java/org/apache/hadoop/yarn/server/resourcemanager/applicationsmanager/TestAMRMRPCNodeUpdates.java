@@ -21,7 +21,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.applicationsmanager;
 import java.security.PrivilegedExceptionAction;
 import java.util.List;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
@@ -115,6 +115,7 @@ public class TestAMRMRPCNodeUpdates {
     MockNM nm2 = rm.registerNode("127.0.0.2:1234", 10000);
     MockNM nm3 = rm.registerNode("127.0.0.3:1234", 10000);
     MockNM nm4 = rm.registerNode("127.0.0.4:1234", 10000);
+    dispatcher.await();
 
     RMApp app1 = rm.submitApp(2000);
 

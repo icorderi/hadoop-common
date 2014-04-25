@@ -77,15 +77,15 @@ public class LeaseManager {
   // Used for handling lock-leases
   // Mapping: leaseHolder -> Lease
   //
-  private SortedMap<String, Lease> leases = new TreeMap<String, Lease>();
+  private final SortedMap<String, Lease> leases = new TreeMap<String, Lease>();
   // Set of: Lease
-  private SortedSet<Lease> sortedLeases = new TreeSet<Lease>();
+  private final SortedSet<Lease> sortedLeases = new TreeSet<Lease>();
 
   // 
   // Map path names to leases. It is protected by the sortedLeases lock.
   // The map stores pathnames in lexicographical order.
   //
-  private SortedMap<String, Lease> sortedLeasesByPath = new TreeMap<String, Lease>();
+  private final SortedMap<String, Lease> sortedLeasesByPath = new TreeMap<String, Lease>();
 
   private Daemon lmthread;
   private volatile boolean shouldRunMonitor;
@@ -339,7 +339,12 @@ public class LeaseManager {
     }
 
     final Map<String, Lease> entries = new HashMap<String, Lease>();
-    final int srclen = prefix.length();
+    int srclen = prefix.length();
+    
+    // prefix may ended with '/'
+    if (prefix.charAt(srclen - 1) == Path.SEPARATOR_CHAR) {
+      srclen -= 1;
+    }
 
     for(Map.Entry<String, Lease> entry : path2lease.tailMap(prefix).entrySet()) {
       final String p = entry.getKey();
@@ -397,7 +402,6 @@ public class LeaseManager {
   /**
    * Get the list of inodes corresponding to valid leases.
    * @return list of inodes
-   * @throws UnresolvedLinkException
    */
   Map<String, INodeFile> getINodesUnderConstruction() {
     Map<String, INodeFile> inodes = new TreeMap<String, INodeFile>();

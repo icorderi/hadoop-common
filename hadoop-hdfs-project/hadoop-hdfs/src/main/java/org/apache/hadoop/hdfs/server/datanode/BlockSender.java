@@ -168,7 +168,7 @@ class BlockSender implements java.io.Closeable {
    * @param block Block that is being read
    * @param startOffset starting offset to read from
    * @param length length of data to read
-   * @param corruptChecksumOk
+   * @param corruptChecksumOk if true, corrupt checksum is okay
    * @param verifyChecksum verify checksum while reading the data
    * @param sendChecksum send checksum to client.
    * @param datanode datanode from which the block is being read
@@ -560,7 +560,11 @@ class BlockSender implements java.io.Closeable {
          * part of a block and then decides not to read the rest (but leaves
          * the socket open).
          */
-          LOG.info("exception: ", e);
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("Failed to send data:", e);
+        } else {
+          LOG.info("Failed to send data: " + e);
+        }
       } else {
         /* Exception while writing to the client. Connection closure from
          * the other end is mostly the case and we do not care much about

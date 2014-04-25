@@ -17,8 +17,6 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
-import java.io.DataOutput;
-import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -34,7 +32,6 @@ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffType;
 import org.apache.hadoop.hdfs.server.namenode.Content;
 import org.apache.hadoop.hdfs.server.namenode.ContentSummaryComputationContext;
-import org.apache.hadoop.hdfs.server.namenode.FSImageSerialization;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
@@ -42,7 +39,6 @@ import org.apache.hadoop.hdfs.server.namenode.INodeDirectoryAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference;
 import org.apache.hadoop.hdfs.server.namenode.Quota;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat.ReferenceMap;
 import org.apache.hadoop.hdfs.util.Diff;
 import org.apache.hadoop.hdfs.util.Diff.Container;
 import org.apache.hadoop.hdfs.util.Diff.ListType;
@@ -122,35 +118,6 @@ public class DirectoryWithSnapshotFeature implements INode.Feature {
       }
       deletedList.clear();
       return counts;
-    }
-
-    /** Serialize {@link #created} */
-    private void writeCreated(DataOutput out) throws IOException {
-      final List<INode> created = getList(ListType.CREATED);
-      out.writeInt(created.size());
-      for (INode node : created) {
-        // For INode in created list, we only need to record its local name
-        byte[] name = node.getLocalNameBytes();
-        out.writeShort(name.length);
-        out.write(name);
-      }
-    }
-
-    /** Serialize {@link #deleted} */
-    private void writeDeleted(DataOutput out,
-        ReferenceMap referenceMap) throws IOException {
-      final List<INode> deleted = getList(ListType.DELETED);
-      out.writeInt(deleted.size());
-      for (INode node : deleted) {
-        FSImageSerialization.saveINode2Image(node, out, true, referenceMap);
-      }
-    }
-
-    /** Serialize to out */
-    private void write(DataOutput out, ReferenceMap referenceMap
-        ) throws IOException {
-      writeCreated(out);
-      writeDeleted(out, referenceMap);
     }
 
     /** Get the list of INodeDirectory contained in the deleted list */
@@ -244,7 +211,7 @@ public class DirectoryWithSnapshotFeature implements INode.Feature {
       this.isSnapshotRoot = isSnapshotRoot;
     }
 
-    ChildrenDiff getChildrenDiff() {
+    public ChildrenDiff getChildrenDiff() {
       return diff;
     }
     
@@ -343,23 +310,8 @@ public class DirectoryWithSnapshotFeature implements INode.Feature {
       return super.toString() + " childrenSize=" + childrenSize + ", " + diff;
     }
 
-    @Override
-    void write(DataOutput out, ReferenceMap referenceMap) throws IOException {
-      writeSnapshot(out);
-      out.writeInt(childrenSize);
-
-      // Write snapshotINode
-      out.writeBoolean(isSnapshotRoot);
-      if (!isSnapshotRoot) {
-        if (snapshotINode != null) {
-          out.writeBoolean(true);
-          FSImageSerialization.writeINodeDirectoryAttributes(snapshotINode, out);
-        } else {
-          out.writeBoolean(false);
-        }
-      }
-      // Write diff. Node need to write poseriorDiff, since diffs is a list.
-      diff.write(out, referenceMap);
+    int getChildrenSize() {
+      return childrenSize;
     }
 
     @Override
@@ -411,6 +363,25 @@ public class DirectoryWithSnapshotFeature implements INode.Feature {
         }
       }
       return false;
+    }
+
+    /**
+     * Find the corresponding snapshot whose deleted list contains the given
+     * inode.
+     * @return the id of the snapshot. {@link Snapshot#NO_SNAPSHOT_ID} if the
+     * given inode is not in any of the snapshot.
+     */
+    public int findSnapshotDeleted(final INode child) {
+      final List<DirectoryDiff> diffList = asList();
+      for(int i = diffList.size() - 1; i >= 0; i--) {
+        final ChildrenDiff diff = diffList.get(i).diff;
+        final int d = diff.searchIndex(ListType.DELETED,
+            child.getLocalNameBytes());
+        if (d >= 0 && diff.getList(ListType.DELETED).get(d) == child) {
+          return diffList.get(i).getSnapshotId();
+        }
+      }
+      return Snapshot.NO_SNAPSHOT_ID;
     }
   }
   

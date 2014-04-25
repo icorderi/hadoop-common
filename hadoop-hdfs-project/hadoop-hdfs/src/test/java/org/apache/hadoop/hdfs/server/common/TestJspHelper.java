@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.common;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -28,7 +29,6 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
-import java.text.MessageFormat;
 import java.util.ArrayList;
 
 import javax.servlet.ServletContext;
@@ -61,6 +61,7 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -74,8 +75,15 @@ import com.google.common.base.Strings;
 
 public class TestJspHelper {
 
-  private Configuration conf = new HdfsConfiguration();
+  private final Configuration conf = new HdfsConfiguration();
   private String jspWriterOutput = "";
+
+  // allow user with TGT to run tests
+  @BeforeClass
+  public static void setupKerb() {
+    System.setProperty("java.security.krb5.kdc", "");
+    System.setProperty("java.security.krb5.realm", "NONE");
+  }    
 
   public static class DummySecretManager extends
       AbstractDelegationTokenSecretManager<DelegationTokenIdentifier> {
@@ -615,31 +623,63 @@ public class TestJspHelper {
     }
   }
 
+  @Test 
+  public void testAuthority(){
+    DatanodeID dnWithIp = new DatanodeID("127.0.0.1", "hostName", null,
+        50020, 50075, 50076, 50010);
+    assertNotNull(JspHelper.Url.authority("http", dnWithIp));
+
+    DatanodeID dnWithNullIp = new DatanodeID(null, "hostName", null,
+        50020, 50075, 50076, 50010);
+    assertNotNull(JspHelper.Url.authority("http", dnWithNullIp));
+
+    DatanodeID dnWithEmptyIp = new DatanodeID("", "hostName", null,
+        50020, 50075, 50076, 50010);
+    assertNotNull(JspHelper.Url.authority("http", dnWithEmptyIp));
+  }
+ 
+  private static String clientAddr = "1.1.1.1";
+  private static String chainedClientAddr = clientAddr+", 2.2.2.2";
+  private static String proxyAddr = "3.3.3.3";
+  
   @Test
-  public void testUpgradeStatusReport() {
-    short status = 6;
-    int version = 15;
-    String EXPECTED__NOTF_PATTERN = "Upgrade for version {0} has been completed.\nUpgrade is not finalized.";
-    String EXPECTED_PATTERN = "Upgrade for version {0} is in progress. Status = {1}%";
+  public void testRemoteAddr() {
+    assertEquals(clientAddr, getRemoteAddr(clientAddr, null, false));
+  }
+  
+  @Test
+  public void testRemoteAddrWithUntrustedProxy() {
+    assertEquals(proxyAddr, getRemoteAddr(clientAddr, proxyAddr, false));
+  }
 
-    UpgradeStatusReport upgradeStatusReport = new UpgradeStatusReport(version,
-        status, true);
-    assertTrue(upgradeStatusReport.getVersion() == version);
-    assertTrue(upgradeStatusReport.getUpgradeStatus() == status);
-    assertTrue(upgradeStatusReport.isFinalized());
+  @Test
+  public void testRemoteAddrWithTrustedProxy() {
+    assertEquals(clientAddr, getRemoteAddr(clientAddr, proxyAddr, true));
+    assertEquals(clientAddr, getRemoteAddr(chainedClientAddr, proxyAddr, true));
+  }
 
-    assertEquals(MessageFormat.format(EXPECTED_PATTERN, version, status),
-        upgradeStatusReport.getStatusText(true));
+  @Test
+  public void testRemoteAddrWithTrustedProxyAndEmptyClient() {
+    assertEquals(proxyAddr, getRemoteAddr(null, proxyAddr, true));
+    assertEquals(proxyAddr, getRemoteAddr("", proxyAddr, true));
+  }
 
-    status += 100;
-    upgradeStatusReport = new UpgradeStatusReport(version, status, false);
-    assertFalse(upgradeStatusReport.isFinalized());
-    assertTrue(upgradeStatusReport.toString().equals(
-        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
-    assertTrue(upgradeStatusReport.getStatusText(false).equals(
-        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
-    assertTrue(upgradeStatusReport.getStatusText(true).equals(
-        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
-  }  
+  private String getRemoteAddr(String clientAddr, String proxyAddr, boolean trusted) {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getRemoteAddr()).thenReturn("1.2.3.4");
+
+    Configuration conf = new Configuration();
+    if (proxyAddr == null) {
+      when(req.getRemoteAddr()).thenReturn(clientAddr);
+    } else {
+      when(req.getRemoteAddr()).thenReturn(proxyAddr);
+      when(req.getHeader("X-Forwarded-For")).thenReturn(clientAddr);
+      if (trusted) {
+        conf.set(ProxyUsers.CONF_HADOOP_PROXYSERVERS, proxyAddr);
+      }
+    }
+    ProxyUsers.refreshSuperUserGroupsConfiguration(conf);
+    return JspHelper.getRemoteAddr(req);
+  }
 }
 

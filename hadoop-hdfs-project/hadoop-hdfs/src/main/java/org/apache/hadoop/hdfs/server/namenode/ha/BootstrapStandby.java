@@ -18,7 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -46,6 +46,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.TransferFsImage;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.tools.DFSHAAdmin;
@@ -96,7 +97,7 @@ public class BootstrapStandby implements Tool, Configurable {
 
     InetSocketAddress myAddr = NameNode.getAddress(conf);
     SecurityUtil.login(conf, DFS_NAMENODE_KEYTAB_FILE_KEY,
-        DFS_NAMENODE_USER_NAME_KEY, myAddr.getHostName());
+        DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, myAddr.getHostName());
 
     return SecurityUtil.doAsLoginUserOrFatal(new PrivilegedAction<Integer>() {
       @Override
@@ -153,9 +154,9 @@ public class BootstrapStandby implements Tool, Configurable {
     }
 
     if (!checkLayoutVersion(nsInfo)) {
-      LOG.fatal("Layout version on remote node (" +
-          nsInfo.getLayoutVersion() + ") does not match " +
-          "this node's layout version (" + HdfsConstants.LAYOUT_VERSION + ")");
+      LOG.fatal("Layout version on remote node (" + nsInfo.getLayoutVersion()
+          + ") does not match " + "this node's layout version ("
+          + HdfsConstants.NAMENODE_LAYOUT_VERSION + ")");
       return ERR_CODE_INVALID_VERSION;
     }
 
@@ -207,9 +208,9 @@ public class BootstrapStandby implements Tool, Configurable {
 
       // Download that checkpoint into our storage directories.
       MD5Hash hash = TransferFsImage.downloadImageToStorage(
-        otherHttpAddr, imageTxId,
-        storage, true);
-      image.saveDigestAndRenameCheckpointImage(imageTxId, hash);
+        otherHttpAddr, imageTxId, storage, true);
+      image.saveDigestAndRenameCheckpointImage(NameNodeFile.IMAGE, imageTxId,
+          hash);
     } catch (IOException ioe) {
       image.close();
       throw ioe;
@@ -257,7 +258,7 @@ public class BootstrapStandby implements Tool, Configurable {
   }
 
   private boolean checkLayoutVersion(NamespaceInfo nsInfo) throws IOException {
-    return (nsInfo.getLayoutVersion() == HdfsConstants.LAYOUT_VERSION);
+    return (nsInfo.getLayoutVersion() == HdfsConstants.NAMENODE_LAYOUT_VERSION);
   }
   
   private void parseConfAndFindOtherNN() throws IOException {

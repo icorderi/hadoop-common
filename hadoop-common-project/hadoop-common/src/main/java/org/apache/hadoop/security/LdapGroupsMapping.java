@@ -251,7 +251,6 @@ public class LdapGroupsMapping
     return groups;
   }
 
-  @SuppressWarnings("deprecation")
   DirContext getDirContext() throws NamingException {
     if (ctx == null) {
       // Set up the initial environment for LDAP connectivity
@@ -356,7 +355,7 @@ public class LdapGroupsMapping
         c = reader.read();
       }
       reader.close();
-      return password.toString();
+      return password.toString().trim();
     } catch (IOException ioe) {
       throw new RuntimeException("Could not read password file: " + pwFile, ioe);
     }

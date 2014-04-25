@@ -36,6 +36,7 @@ import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryStore;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryWriter;
+import org.apache.hadoop.yarn.server.applicationhistoryservice.FileSystemApplicationHistoryStore;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.NullApplicationHistoryStore;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.records.ApplicationAttemptFinishData;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.records.ApplicationAttemptStartData;
@@ -43,9 +44,12 @@ import org.apache.hadoop.yarn.server.applicationhistoryservice.records.Applicati
 import org.apache.hadoop.yarn.server.applicationhistoryservice.records.ApplicationStartData;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.records.ContainerFinishData;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.records.ContainerStartData;
+import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 
 /**
@@ -78,8 +82,8 @@ public class RMApplicationHistoryWriter extends CompositeService {
   protected synchronized void serviceInit(Configuration conf) throws Exception {
 
     historyServiceEnabled =
-        conf.getBoolean(YarnConfiguration.YARN_HISTORY_SERVICE_ENABLED,
-          YarnConfiguration.DEFAULT_YARN_HISTORY_SERVICE_ENABLED);
+        conf.getBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+          YarnConfiguration.DEFAULT_APPLICATION_HISTORY_ENABLED);
 
     writer = createApplicationHistoryStore(conf);
     addIfService(writer);
@@ -109,14 +113,15 @@ public class RMApplicationHistoryWriter extends CompositeService {
     if (historyServiceEnabled) {
       try {
         Class<? extends ApplicationHistoryStore> storeClass =
-            conf.getClass(YarnConfiguration.RM_HISTORY_WRITER_CLASS,
-              NullApplicationHistoryStore.class, ApplicationHistoryStore.class);
+            conf.getClass(YarnConfiguration.APPLICATION_HISTORY_STORE,
+              FileSystemApplicationHistoryStore.class,
+              ApplicationHistoryStore.class);
         return storeClass.newInstance();
       } catch (Exception e) {
         String msg =
             "Could not instantiate ApplicationHistoryWriter: "
-                + conf.get(YarnConfiguration.RM_HISTORY_WRITER_CLASS,
-                  NullApplicationHistoryStore.class.getName());
+                + conf.get(YarnConfiguration.APPLICATION_HISTORY_STORE,
+                  FileSystemApplicationHistoryStore.class.getName());
         LOG.error(msg, e);
         throw new YarnRuntimeException(msg, e);
       }
@@ -211,20 +216,25 @@ public class RMApplicationHistoryWriter extends CompositeService {
 
   @SuppressWarnings("unchecked")
   public void applicationStarted(RMApp app) {
-    dispatcher.getEventHandler().handle(
-      new WritingApplicationStartEvent(app.getApplicationId(),
-        ApplicationStartData.newInstance(app.getApplicationId(), app.getName(),
-          app.getApplicationType(), app.getQueue(), app.getUser(),
-          app.getSubmitTime(), app.getStartTime())));
+    if (historyServiceEnabled) {
+      dispatcher.getEventHandler().handle(
+        new WritingApplicationStartEvent(app.getApplicationId(),
+          ApplicationStartData.newInstance(app.getApplicationId(), app.getName(),
+            app.getApplicationType(), app.getQueue(), app.getUser(),
+            app.getSubmitTime(), app.getStartTime())));
+    }
   }
 
   @SuppressWarnings("unchecked")
-  public void applicationFinished(RMApp app) {
-    dispatcher.getEventHandler().handle(
-      new WritingApplicationFinishEvent(app.getApplicationId(),
-        ApplicationFinishData.newInstance(app.getApplicationId(),
-          app.getFinishTime(), app.getDiagnostics().toString(),
-          app.getFinalApplicationStatus(), app.createApplicationState())));
+  public void applicationFinished(RMApp app, RMAppState finalState) {
+    if (historyServiceEnabled) {
+      dispatcher.getEventHandler().handle(
+        new WritingApplicationFinishEvent(app.getApplicationId(),
+          ApplicationFinishData.newInstance(app.getApplicationId(),
+            app.getFinishTime(), app.getDiagnostics().toString(),
+            app.getFinalApplicationStatus(),
+            RMServerUtils.createApplicationState(finalState))));
+    }
   }
 
   @SuppressWarnings("unchecked")
@@ -239,15 +249,16 @@ public class RMApplicationHistoryWriter extends CompositeService {
   }
 
   @SuppressWarnings("unchecked")
-  public void applicationAttemptFinished(RMAppAttempt appAttempt) {
+  public void applicationAttemptFinished(RMAppAttempt appAttempt,
+      RMAppAttemptState finalState) {
     if (historyServiceEnabled) {
       dispatcher.getEventHandler().handle(
         new WritingApplicationAttemptFinishEvent(appAttempt.getAppAttemptId(),
           ApplicationAttemptFinishData.newInstance(
             appAttempt.getAppAttemptId(), appAttempt.getDiagnostics()
               .toString(), appAttempt.getTrackingUrl(), appAttempt
-              .getFinalApplicationStatus(), appAttempt
-              .createApplicationAttemptState())));
+              .getFinalApplicationStatus(),
+              RMServerUtils.createApplicationAttemptState(finalState))));
     }
   }
 
@@ -269,7 +280,7 @@ public class RMApplicationHistoryWriter extends CompositeService {
         new WritingContainerFinishEvent(container.getContainerId(),
           ContainerFinishData.newInstance(container.getContainerId(),
             container.getFinishTime(), container.getDiagnosticsInfo(),
-            container.getLogURL(), container.getContainerExitStatus(),
+            container.getContainerExitStatus(),
             container.getContainerState())));
     }
   }

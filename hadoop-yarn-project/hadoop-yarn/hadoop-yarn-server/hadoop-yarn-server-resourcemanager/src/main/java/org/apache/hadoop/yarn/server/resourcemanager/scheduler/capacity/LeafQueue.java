@@ -50,7 +50,6 @@ import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
-import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
@@ -108,8 +107,6 @@ public class LeafQueue implements CSQueue {
   private final Resource maximumAllocation;
   private final float minimumAllocationFactor;
 
-  private RMContainerTokenSecretManager containerTokenSecretManager;
-
   private Map<String, User> users = new HashMap<String, User>();
   
   private final QueueMetrics metrics;
@@ -150,7 +147,6 @@ public class LeafQueue implements CSQueue {
         Resources.ratio(resourceCalculator, 
             Resources.subtract(maximumAllocation, minimumAllocation), 
             maximumAllocation);
-    this.containerTokenSecretManager = cs.getContainerTokenSecretManager();
 
     float capacity = 
       (float)cs.getConfiguration().getCapacity(getQueuePath()) / 100;
@@ -561,7 +557,7 @@ public class LeafQueue implements CSQueue {
     return queueName + ": " + 
         "capacity=" + capacity + ", " + 
         "absoluteCapacity=" + absoluteCapacity + ", " + 
-        "usedResources=" + usedResources +  
+        "usedResources=" + usedResources +  ", " +
         "usedCapacity=" + getUsedCapacity() + ", " + 
         "absoluteUsedCapacity=" + getAbsoluteUsedCapacity() + ", " +
         "numApps=" + getNumApplications() + ", " + 
@@ -837,10 +833,14 @@ public class LeafQueue implements CSQueue {
         
         // Schedule in priority order
         for (Priority priority : application.getPriorities()) {
+          ResourceRequest anyRequest =
+              application.getResourceRequest(priority, ResourceRequest.ANY);
+          if (null == anyRequest) {
+            continue;
+          }
+          
           // Required resource
-          Resource required = 
-              application.getResourceRequest(
-                  priority, ResourceRequest.ANY).getCapability();
+          Resource required = anyRequest.getCapability();
 
           // Do we need containers at this 'priority'?
           if (!needContainers(application, priority, required)) {
@@ -946,15 +946,16 @@ public class LeafQueue implements CSQueue {
             Resources.add(usedResources, required), 
             clusterResource);
     if (potentialNewCapacity > absoluteMaxCapacity) {
-      LOG.info(getQueueName() + 
-          " usedResources: " + usedResources +
-          " clusterResources: " + clusterResource +
-          " currentCapacity " + 
-            Resources.divide(resourceCalculator, clusterResource, 
-                usedResources, clusterResource) + 
-          " required " + required +
-          " potentialNewCapacity: " + potentialNewCapacity + " ( " +
-          " max-capacity: " + absoluteMaxCapacity + ")");
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(getQueueName()
+            + " usedResources: " + usedResources
+            + " clusterResources: " + clusterResource
+            + " currentCapacity "
+            + Resources.divide(resourceCalculator, clusterResource,
+              usedResources, clusterResource) + " required " + required
+            + " potentialNewCapacity: " + potentialNewCapacity + " ( "
+            + " max-capacity: " + absoluteMaxCapacity + ")");
+      }
       return false;
     }
     return true;
@@ -1292,22 +1293,12 @@ public class LeafQueue implements CSQueue {
     return container;
   }
 
-  /**
-   * Create <code>ContainerToken</code>, only in secure-mode
-   */
-  Token createContainerToken(
-      FiCaSchedulerApp application, Container container) {
-    return containerTokenSecretManager.createContainerToken(
-        container.getId(), container.getNodeId(),
-        application.getUser(), container.getResource());
-  }
-
   private Resource assignContainer(Resource clusterResource, FiCaSchedulerNode node, 
       FiCaSchedulerApp application, Priority priority, 
       ResourceRequest request, NodeType type, RMContainer rmContainer) {
     if (LOG.isDebugEnabled()) {
       LOG.debug("assignContainers: node=" + node.getNodeName()
-        + " application=" + application.getApplicationId().getId()
+        + " application=" + application.getApplicationId()
         + " priority=" + priority.getPriority()
         + " request=" + request + " type=" + type);
     }
@@ -1345,14 +1336,6 @@ public class LeafQueue implements CSQueue {
         unreserve(application, priority, node, rmContainer);
       }
 
-      Token containerToken =
-          createContainerToken(application, container);
-      if (containerToken == null) {
-        // Something went wrong...
-        return Resources.none();
-      }
-      container.setContainerToken(containerToken);
-      
       // Inform the application
       RMContainer allocatedContainer = 
           application.allocate(type, node, priority, request, container);
@@ -1367,14 +1350,10 @@ public class LeafQueue implements CSQueue {
           allocatedContainer);
 
       LOG.info("assignedContainer" +
-          " application=" + application.getApplicationId() +
+          " application attempt=" + application.getApplicationAttemptId() +
           " container=" + container + 
-          " containerId=" + container.getId() + 
           " queue=" + this + 
-          " usedCapacity=" + getUsedCapacity() +
-          " absoluteUsedCapacity=" + getAbsoluteUsedCapacity() +
-          " used=" + usedResources + 
-          " cluster=" + clusterResource);
+          " clusterResource=" + clusterResource);
 
       return container.getResource();
     } else {
@@ -1382,13 +1361,11 @@ public class LeafQueue implements CSQueue {
       reserve(application, priority, node, rmContainer, container);
 
       LOG.info("Reserved container " + 
-          " application=" + application.getApplicationId() +
+          " application attempt=" + application.getApplicationAttemptId() +
           " resource=" + request.getCapability() + 
           " queue=" + this.toString() + 
-          " usedCapacity=" + getUsedCapacity() +
-          " absoluteUsedCapacity=" + getAbsoluteUsedCapacity() +
-          " used=" + usedResources + 
-          " cluster=" + clusterResource);
+          " node=" + node +
+          " clusterResource=" + clusterResource);
 
       return request.getCapability();
     }
@@ -1428,12 +1405,14 @@ public class LeafQueue implements CSQueue {
       FiCaSchedulerApp application, FiCaSchedulerNode node, RMContainer rmContainer, 
       ContainerStatus containerStatus, RMContainerEventType event, CSQueue childQueue) {
     if (application != null) {
+
+      boolean removed = false;
+
       // Careful! Locking order is important!
       synchronized (this) {
 
         Container container = rmContainer.getContainer();
 
-        boolean removed = false;
         // Inform the application & the node
         // Note: It's safe to assume that all state changes to RMContainer
         // happen under scheduler's lock... 
@@ -1453,19 +1432,16 @@ public class LeafQueue implements CSQueue {
               application, container.getResource());
           LOG.info("completedContainer" +
               " container=" + container +
-              " resource=" + container.getResource() +
               " queue=" + this +
-              " usedCapacity=" + getUsedCapacity() +
-              " absoluteUsedCapacity=" + getAbsoluteUsedCapacity() +
-              " used=" + usedResources +
               " cluster=" + clusterResource);
-          // Inform the parent queue
-          getParent().completedContainer(clusterResource, application,
-              node, rmContainer, null, event, this);
         }
       }
 
-
+      if (removed) {
+        // Inform the parent queue _outside_ of the leaf-queue lock
+        getParent().completedContainer(clusterResource, application, node,
+          rmContainer, null, event, this);
+      }
     }
   }
 

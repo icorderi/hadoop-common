@@ -478,6 +478,30 @@ public abstract class RMStateStore extends AbstractService {
       RMDelegationTokenIdentifier rmDTIdentifier) throws Exception;
 
   /**
+   * RMDTSecretManager call this to update the state of a delegation token
+   * and sequence number
+   */
+  public synchronized void updateRMDelegationTokenAndSequenceNumber(
+      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate,
+      int latestSequenceNumber) {
+    try {
+      updateRMDelegationTokenAndSequenceNumberInternal(rmDTIdentifier, renewDate,
+          latestSequenceNumber);
+    } catch (Exception e) {
+      notifyStoreOperationFailed(e);
+    }
+  }
+
+  /**
+   * Blocking API
+   * Derived classes must implement this method to update the state of
+   * RMDelegationToken and sequence number
+   */
+  protected abstract void updateRMDelegationTokenAndSequenceNumberInternal(
+      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate,
+      int latestSequenceNumber) throws Exception;
+
+  /**
    * RMDTSecretManager call this to store the state of a master key
    */
   public synchronized void storeRMDTMasterKey(DelegationKey delegationKey) {
@@ -548,7 +572,7 @@ public abstract class RMStateStore extends AbstractService {
       ApplicationState appState) throws Exception;
 
   // TODO: This should eventually become cluster-Id + "AM_RM_TOKEN_SERVICE". See
-  // YARN-986 
+  // YARN-1779
   public static final Text AM_RM_TOKEN_SERVICE = new Text(
     "AM_RM_TOKEN_SERVICE");
 
@@ -604,7 +628,7 @@ public abstract class RMStateStore extends AbstractService {
           notifyDoneUpdatingApplication(appId, storedException);
         }
       } catch (Exception e) {
-        LOG.error("Error storing app: " + appId, e);
+        LOG.error("Error storing/updating app: " + appId, e);
         notifyStoreOperationFailed(e);
       }
     } else if (event.getType().equals(RMStateStoreEventType.STORE_APP_ATTEMPT)
@@ -655,7 +679,7 @@ public abstract class RMStateStore extends AbstractService {
         }
       } catch (Exception e) {
         LOG.error(
-            "Error storing appAttempt: " + attemptState.getAttemptId(), e);
+            "Error storing/updating appAttempt: " + attemptState.getAttemptId(), e);
         notifyStoreOperationFailed(e);
       }
     } else if (event.getType().equals(RMStateStoreEventType.REMOVE_APP)) {
@@ -676,11 +700,11 @@ public abstract class RMStateStore extends AbstractService {
 
   @SuppressWarnings("unchecked")
   /**
-   * In {#handleStoreEvent}, this method is called to notify the
-   * ResourceManager that the store operation has failed.
+   * This method is called to notify the ResourceManager that the store
+   * operation has failed.
    * @param failureCause the exception due to which the operation failed
    */
-  private void notifyStoreOperationFailed(Exception failureCause) {
+  protected void notifyStoreOperationFailed(Exception failureCause) {
     RMFatalEventType type;
     if (failureCause instanceof StoreFencedException) {
       type = RMFatalEventType.STATE_STORE_FENCED;

@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
    Licensed to the Apache Software Foundation (ASF) under one or more
    contributor license agreements.  See the NOTICE file distributed with
@@ -15,7 +16,6 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 -->
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 
 <!-- Do not modify this file directly.  Instead, copy entries that you -->
 <!-- wish to modify from this file into mapred-site.xml and change them -->
@@ -148,6 +148,21 @@
   <description>Expert: The maximum amount of time (in milli seconds) reduce
   task waits for map output data to be available for reading after obtaining
   connection.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.shuffle.connection-keep-alive.enable</name>
+  <value>false</value>
+  <description>set to true to support keep-alive connections.</description>
+</property>
+
+<property>
+  <name>mapreduce.shuffle.connection-keep-alive.timeout</name>
+  <value>5</value>
+  <description>The number of seconds a shuffle client attempts to retain
+   http connection. Refer "Keep-Alive: timeout=" header in
+   Http specification
   </description>
 </property>
 
@@ -328,6 +343,30 @@
 </property>
 
 <property>
+  <name>mapreduce.shuffle.transferTo.allowed</name>
+  <value></value>
+  <description>This option can enable/disable using nio transferTo method in 
+  the shuffle phase. NIO transferTo does not perform well on windows in the 
+  shuffle phase. Thus, with this configuration property it is possible to 
+  disable it, in which case custom transfer method will be used. Recommended 
+  value is false when running Hadoop on Windows. For Linux, it is recommended 
+  to set it to true. If nothing is set then the default value is false for 
+  Windows, and true for Linux.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.shuffle.transfer.buffer.size</name>
+  <value>131072</value>
+  <description>This property is used only if 
+  mapreduce.shuffle.transferTo.allowed is set to false. In that case, 
+  this property defines the size of the buffer used in the buffer copy code
+  for the shuffle phase. The size of this buffer determines the size of the IO
+  requests.
+  </description>
+</property>
+
+<property>
   <name>mapreduce.reduce.markreset.buffer.percent</name>
   <value>0.0</value>
   <description>The percentage of memory -relative to the maximum heap size- to
@@ -430,6 +469,16 @@
   take priority over this setting.</description>
 </property>
 
+<property>
+  <name>mapreduce.input.fileinputformat.list-status.num-threads</name>
+  <value>1</value>
+  <description>The number of threads to use to list and fetch block locations
+  for the specified input paths. Note: multiple threads should not be used
+  if a custom non thread-safe path filter is used.
+  </description>
+</property>
+
+
 
 <property>
   <name>mapreduce.client.submit.file.replication</name>
@@ -507,6 +556,14 @@
   <name>mapreduce.task.userlog.limit.kb</name>
   <value>0</value>
   <description>The maximum size of user-logs of each task in KB. 0 disables the cap.
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.am.container.log.limit.kb</name>
+  <value>0</value>
+  <description>The maximum size of the MRAppMaster attempt container logs in KB.
+    0 disables the cap.
   </description>
 </property>
 
@@ -726,6 +783,14 @@
     the queue, and access is allowed for submitting jobs to the queue.
   </description>
 </property>
+
+  <property>
+    <name>mapreduce.job.tags</name>
+    <value></value>
+    <description> Tags for the job that will be passed to YARN at submission 
+      time. Queries to YARN for applications can filter on these tags.
+    </description>
+  </property>
 
 <property>
   <name>mapreduce.cluster.local.dir</name>
@@ -1092,18 +1157,35 @@
   <description>CLASSPATH for MR applications. A comma-separated list
   of CLASSPATH entries. If mapreduce.application.framework is set then this
   must specify the appropriate classpath for that archive, and the name of
-  the archive must be present in the classpath. 
-  When this value is empty, the following default CLASSPATH for MR 
-  applications would be used. 
+  the archive must be present in the classpath.
+  If mapreduce.app-submission.cross-platform is false, platform-specific
+  environment vairable expansion syntax would be used to construct the default
+  CLASSPATH entries.
   For Linux:
   $HADOOP_MAPRED_HOME/share/hadoop/mapreduce/*,
   $HADOOP_MAPRED_HOME/share/hadoop/mapreduce/lib/*.
   For Windows:
   %HADOOP_MAPRED_HOME%/share/hadoop/mapreduce/*,
   %HADOOP_MAPRED_HOME%/share/hadoop/mapreduce/lib/*.
+
+  If mapreduce.app-submission.cross-platform is true, platform-agnostic default
+  CLASSPATH for MR applications would be used:
+  {{HADOOP_MAPRED_HOME}}/share/hadoop/mapreduce/*,
+  {{HADOOP_MAPRED_HOME}}/share/hadoop/mapreduce/lib/*
+  Parameter expansion marker will be replaced by NodeManager on container
+  launch based on the underlying OS accordingly.
   </description>
    <name>mapreduce.application.classpath</name>
    <value></value>
+</property>
+
+<property>
+  <description>If enabled, user can submit an application cross-platform
+  i.e. submit an application from a Windows client to a Linux/Unix server or
+  vice versa.
+  </description>
+  <name>mapreduce.app-submission.cross-platform</name>
+  <value>false</value>
 </property>
 
 <property>

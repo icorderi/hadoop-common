@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -54,7 +55,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
 
   // Stores status of decommissioning.
   // If node is not decommissioning, do not use this object for anything.
-  public DecommissioningStatus decommissioningStatus = new DecommissioningStatus();
+  public final DecommissioningStatus decommissioningStatus = new DecommissioningStatus();
   
   /** Block and targets pair */
   @InterfaceAudience.Private
@@ -189,12 +190,12 @@ public class DatanodeDescriptor extends DatanodeInfo {
   private long bandwidth;
 
   /** A queue of blocks to be replicated by this datanode */
-  private BlockQueue<BlockTargetPair> replicateBlocks = new BlockQueue<BlockTargetPair>();
+  private final BlockQueue<BlockTargetPair> replicateBlocks = new BlockQueue<BlockTargetPair>();
   /** A queue of blocks to be recovered by this datanode */
-  private BlockQueue<BlockInfoUnderConstruction> recoverBlocks =
+  private final BlockQueue<BlockInfoUnderConstruction> recoverBlocks =
                                 new BlockQueue<BlockInfoUnderConstruction>();
   /** A set of blocks to be invalidated by this datanode */
-  private LightWeightHashSet<Block> invalidateBlocks = new LightWeightHashSet<Block>();
+  private final LightWeightHashSet<Block> invalidateBlocks = new LightWeightHashSet<Block>();
 
   /* Variables for maintaining number of blocks scheduled to be written to
    * this storage. This count is approximate and might be slightly bigger
@@ -245,7 +246,8 @@ public class DatanodeDescriptor extends DatanodeInfo {
     return false;
   }
 
-  DatanodeStorageInfo getStorageInfo(String storageID) {
+  @VisibleForTesting
+  public DatanodeStorageInfo getStorageInfo(String storageID) {
     synchronized (storageMap) {
       return storageMap.get(storageID);
     }
@@ -366,12 +368,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
     setLastUpdate(Time.now());    
     this.volumeFailures = volFailures;
     for (StorageReport report : reports) {
-      DatanodeStorageInfo storage = storageMap.get(report.getStorage().getStorageID());
-      if (storage == null) {
-        // This is seen during cluster initialization when the heartbeat
-        // is received before the initial block reports from each storage.
-        storage = updateStorage(report.getStorage());
-      }
+      DatanodeStorageInfo storage = updateStorage(report.getStorage());
       storage.receivedHeartbeat(report);
       totalCapacity += report.getCapacity();
       totalRemaining += report.getRemaining();
@@ -669,6 +666,15 @@ public class DatanodeDescriptor extends DatanodeInfo {
                  " for DN " + getXferAddr());
         storage = new DatanodeStorageInfo(this, s);
         storageMap.put(s.getStorageID(), storage);
+      } else if (storage.getState() != s.getState() ||
+                 storage.getStorageType() != s.getStorageType()) {
+        // For backwards compatibility, make sure that the type and
+        // state are updated. Some reports from older datanodes do
+        // not include these fields so we may have assumed defaults.
+        // This check can be removed in the next major release after
+        // 2.4.
+        storage.updateFromStorage(s);
+        storageMap.put(storage.getStorageID(), storage);
       }
       return storage;
     }
@@ -689,5 +695,20 @@ public class DatanodeDescriptor extends DatanodeInfo {
   public void setLastCachingDirectiveSentTimeMs(long time) {
     this.lastCachingDirectiveSentTimeMs = time;
   }
+  
+  /**
+   * checks whether atleast first block report has been received
+   * @return
+   */
+  public boolean checkBlockReportReceived() {
+    if(this.getStorageInfos().length == 0) {
+      return false;
+    }
+    for(DatanodeStorageInfo storageInfo: this.getStorageInfos()) {
+      if(storageInfo.getBlockReportCount() == 0 )
+        return false;
+    }
+    return true;
+ }
 }
 

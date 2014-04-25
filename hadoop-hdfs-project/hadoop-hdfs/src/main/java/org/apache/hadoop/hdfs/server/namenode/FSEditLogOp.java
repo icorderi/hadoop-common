@@ -44,6 +44,9 @@ import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENAME;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENAME_OLD;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENAME_SNAPSHOT;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENEW_DELEGATION_TOKEN;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ROLLING_UPGRADE_FINALIZE;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ROLLING_UPGRADE_START;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_ACL;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_GENSTAMP_V1;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_GENSTAMP_V2;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_NS_QUOTA;
@@ -76,6 +79,10 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.Options.Rename;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclEntryScope;
+import org.apache.hadoop.fs.permission.AclEntryType;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -87,6 +94,8 @@ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
+import org.apache.hadoop.hdfs.protocol.proto.AclProtos.AclEditLogProto;
+import org.apache.hadoop.hdfs.protocolPB.PBHelper;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.util.XMLUtils;
 import org.apache.hadoop.hdfs.util.XMLUtils.InvalidXmlException;
@@ -107,8 +116,11 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 
 /**
  * Helper classes for reading the ops from an InputStream.
@@ -124,7 +136,7 @@ public abstract class FSEditLogOp {
   int rpcCallId = RpcConstants.INVALID_CALL_ID;
 
   final public static class OpInstanceCache {
-    private EnumMap<FSEditLogOpCodes, FSEditLogOp> inst = 
+    private final EnumMap<FSEditLogOpCodes, FSEditLogOp> inst =
         new EnumMap<FSEditLogOpCodes, FSEditLogOp>(FSEditLogOpCodes.class);
     
     public OpInstanceCache() {
@@ -167,7 +179,13 @@ public abstract class FSEditLogOp {
       inst.put(OP_ADD_CACHE_POOL, new AddCachePoolOp());
       inst.put(OP_MODIFY_CACHE_POOL, new ModifyCachePoolOp());
       inst.put(OP_REMOVE_CACHE_POOL, new RemoveCachePoolOp());
+
       inst.put(OP_ADD_BLOCK, new AddBlockOp());
+      inst.put(OP_SET_ACL, new SetAclOp());
+      inst.put(OP_ROLLING_UPGRADE_START, new RollingUpgradeOp(
+          OP_ROLLING_UPGRADE_START, "start"));
+      inst.put(OP_ROLLING_UPGRADE_FINALIZE, new RollingUpgradeOp(
+          OP_ROLLING_UPGRADE_FINALIZE, "finalize"));
     }
     
     public FSEditLogOp get(FSEditLogOpCodes opcode) {
@@ -175,11 +193,22 @@ public abstract class FSEditLogOp {
     }
   }
 
+  private static ImmutableMap<String, FsAction> fsActionMap() {
+    ImmutableMap.Builder<String, FsAction> b = ImmutableMap.builder();
+    for (FsAction v : FsAction.values())
+      b.put(v.SYMBOL, v);
+    return b.build();
+  }
+
+  private static final ImmutableMap<String, FsAction> FSACTION_SYMBOL_MAP
+    = fsActionMap();
+
   /**
    * Constructor for an EditLog Op. EditLog ops cannot be constructed
    * directly, but only through Reader#readOp.
    */
-  private FSEditLogOp(FSEditLogOpCodes opCode) {
+  @VisibleForTesting
+  protected FSEditLogOp(FSEditLogOpCodes opCode) {
     this.opCode = opCode;
   }
 
@@ -245,8 +274,8 @@ public abstract class FSEditLogOp {
   
   void readRpcIds(DataInputStream in, int logVersion)
       throws IOException {
-    if (LayoutVersion.supports(Feature.EDITLOG_SUPPORT_RETRYCACHE,
-        logVersion)) {
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.EDITLOG_SUPPORT_RETRYCACHE, logVersion)) {
       this.rpcClientId = FSImageSerialization.readBytes(in);
       this.rpcCallId = FSImageSerialization.readInt(in);
     }
@@ -257,7 +286,7 @@ public abstract class FSEditLogOp {
         ClientId.toBytes(st.getValue("RPC_CLIENTID"))
         : RpcConstants.DUMMY_CLIENT_ID;
     this.rpcCallId = st.hasChildren("RPC_CALLID") ? 
-        Integer.valueOf(st.getValue("RPC_CALLID"))
+        Integer.parseInt(st.getValue("RPC_CALLID"))
         : RpcConstants.INVALID_CALL_ID;
   }
   
@@ -274,9 +303,78 @@ public abstract class FSEditLogOp {
     XMLUtils.addSaxString(contentHandler, "RPC_CLIENTID",
         ClientId.toString(clientId));
     XMLUtils.addSaxString(contentHandler, "RPC_CALLID", 
-        Integer.valueOf(callId).toString());
+        Integer.toString(callId));
   }
-  
+
+  private static final class AclEditLogUtil {
+    private static final int ACL_EDITLOG_ENTRY_HAS_NAME_OFFSET = 6;
+    private static final int ACL_EDITLOG_ENTRY_TYPE_OFFSET = 3;
+    private static final int ACL_EDITLOG_ENTRY_SCOPE_OFFSET = 5;
+    private static final int ACL_EDITLOG_PERM_MASK = 7;
+    private static final int ACL_EDITLOG_ENTRY_TYPE_MASK = 3;
+    private static final int ACL_EDITLOG_ENTRY_SCOPE_MASK = 1;
+
+    private static final FsAction[] FSACTION_VALUES = FsAction.values();
+    private static final AclEntryScope[] ACL_ENTRY_SCOPE_VALUES = AclEntryScope
+        .values();
+    private static final AclEntryType[] ACL_ENTRY_TYPE_VALUES = AclEntryType
+        .values();
+
+    private static List<AclEntry> read(DataInputStream in, int logVersion)
+        throws IOException {
+      if (!NameNodeLayoutVersion.supports(Feature.EXTENDED_ACL, logVersion)) {
+        return null;
+      }
+
+      int size = in.readInt();
+      if (size == 0) {
+        return null;
+      }
+
+      List<AclEntry> aclEntries = Lists.newArrayListWithCapacity(size);
+      for (int i = 0; i < size; ++i) {
+        int v = in.read();
+        int p = v & ACL_EDITLOG_PERM_MASK;
+        int t = (v >> ACL_EDITLOG_ENTRY_TYPE_OFFSET)
+            & ACL_EDITLOG_ENTRY_TYPE_MASK;
+        int s = (v >> ACL_EDITLOG_ENTRY_SCOPE_OFFSET)
+            & ACL_EDITLOG_ENTRY_SCOPE_MASK;
+        boolean hasName = ((v >> ACL_EDITLOG_ENTRY_HAS_NAME_OFFSET) & 1) == 1;
+        String name = hasName ? FSImageSerialization.readString(in) : null;
+        aclEntries.add(new AclEntry.Builder().setName(name)
+            .setPermission(FSACTION_VALUES[p])
+            .setScope(ACL_ENTRY_SCOPE_VALUES[s])
+            .setType(ACL_ENTRY_TYPE_VALUES[t]).build());
+      }
+
+      return aclEntries;
+    }
+
+    private static void write(List<AclEntry> aclEntries, DataOutputStream out)
+        throws IOException {
+      if (aclEntries == null) {
+        out.writeInt(0);
+        return;
+      }
+
+      out.writeInt(aclEntries.size());
+      for (AclEntry e : aclEntries) {
+        boolean hasName = e.getName() != null;
+        int v = (e.getScope().ordinal() << ACL_EDITLOG_ENTRY_SCOPE_OFFSET)
+            | (e.getType().ordinal() << ACL_EDITLOG_ENTRY_TYPE_OFFSET)
+            | e.getPermission().ordinal();
+
+        if (hasName) {
+          v |= 1 << ACL_EDITLOG_ENTRY_HAS_NAME_OFFSET;
+        }
+        out.write(v);
+        if (hasName) {
+          FSImageSerialization.writeString(e.getName(), out);
+        }
+      }
+    }
+  }
+
   @SuppressWarnings("unchecked")
   static abstract class AddCloseOp extends FSEditLogOp implements BlockListUpdatingOp {
     int length;
@@ -288,6 +386,7 @@ public abstract class FSEditLogOp {
     long blockSize;
     Block[] blocks;
     PermissionStatus permissions;
+    List<AclEntry> aclEntries;
     String clientName;
     String clientMachine;
     
@@ -350,6 +449,11 @@ public abstract class FSEditLogOp {
       return (T)this;
     }
 
+    <T extends AddCloseOp> T setAclEntries(List<AclEntry> aclEntries) {
+      this.aclEntries = aclEntries;
+      return (T)this;
+    }
+
     <T extends AddCloseOp> T setClientName(String clientName) {
       this.clientName = clientName;
       return (T)this;
@@ -372,6 +476,7 @@ public abstract class FSEditLogOp {
       permissions.write(out);
 
       if (this.opCode == OP_ADD) {
+        AclEditLogUtil.write(aclEntries, out);
         FSImageSerialization.writeString(clientName,out);
         FSImageSerialization.writeString(clientMachine,out);
         // write clientId and callId
@@ -382,18 +487,20 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
       }
-      if (LayoutVersion.supports(Feature.ADD_INODE_ID, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.ADD_INODE_ID, logVersion)) {
         this.inodeId = in.readLong();
       } else {
         // The inodeId should be updated when this editLogOp is applied
         this.inodeId = INodeId.GRANDFATHER_INODE_ID;
       }
       if ((-17 < logVersion && length != 4) ||
-          (logVersion <= -17 && length != 5 && !LayoutVersion.supports(
-              Feature.EDITLOG_OP_OPTIMIZATION, logVersion))) {
+          (logVersion <= -17 && length != 5 && !NameNodeLayoutVersion.supports(
+              LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion))) {
         throw new IOException("Incorrect data format."  +
                               " logVersion is " + logVersion +
                               " but writables.length is " +
@@ -401,7 +508,8 @@ public abstract class FSEditLogOp {
       }
       this.path = FSImageSerialization.readString(in);
 
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.replication = FSImageSerialization.readShort(in);
         this.mtime = FSImageSerialization.readLong(in);
       } else {
@@ -409,8 +517,10 @@ public abstract class FSEditLogOp {
         this.mtime = readLong(in);
       }
 
-      if (LayoutVersion.supports(Feature.FILE_ACCESS_TIME, logVersion)) {
-        if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.FILE_ACCESS_TIME, logVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
           this.atime = FSImageSerialization.readLong(in);
         } else {
           this.atime = readLong(in);
@@ -419,7 +529,8 @@ public abstract class FSEditLogOp {
         this.atime = 0;
       }
 
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.blockSize = FSImageSerialization.readLong(in);
       } else {
         this.blockSize = readLong(in);
@@ -430,6 +541,7 @@ public abstract class FSEditLogOp {
 
       // clientname, clientMachine and block locations of last block.
       if (this.opCode == OP_ADD) {
+        aclEntries = AclEditLogUtil.read(in, logVersion);
         this.clientName = FSImageSerialization.readString(in);
         this.clientMachine = FSImageSerialization.readString(in);
         // read clientId and callId
@@ -481,6 +593,8 @@ public abstract class FSEditLogOp {
       builder.append(Arrays.toString(blocks));
       builder.append(", permissions=");
       builder.append(permissions);
+      builder.append(", aclEntries=");
+      builder.append(aclEntries);
       builder.append(", clientName=");
       builder.append(clientName);
       builder.append(", clientMachine=");
@@ -499,18 +613,18 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "INODEID",
-          Long.valueOf(inodeId).toString());
+          Long.toString(inodeId));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "REPLICATION",
           Short.valueOf(replication).toString());
       XMLUtils.addSaxString(contentHandler, "MTIME",
-          Long.valueOf(mtime).toString());
+          Long.toString(mtime));
       XMLUtils.addSaxString(contentHandler, "ATIME",
-          Long.valueOf(atime).toString());
+          Long.toString(atime));
       XMLUtils.addSaxString(contentHandler, "BLOCKSIZE",
-          Long.valueOf(blockSize).toString());
+          Long.toString(blockSize));
       XMLUtils.addSaxString(contentHandler, "CLIENT_NAME", clientName);
       XMLUtils.addSaxString(contentHandler, "CLIENT_MACHINE", clientMachine);
       for (Block b : blocks) {
@@ -518,19 +632,22 @@ public abstract class FSEditLogOp {
       }
       FSEditLogOp.permissionStatusToXml(contentHandler, permissions);
       if (this.opCode == OP_ADD) {
+        if (aclEntries != null) {
+          appendAclEntriesToXml(contentHandler, aclEntries);
+        }
         appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
       }
     }
 
     @Override 
     void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
-      this.inodeId = Long.valueOf(st.getValue("INODEID"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
+      this.inodeId = Long.parseLong(st.getValue("INODEID"));
       this.path = st.getValue("PATH");
       this.replication = Short.valueOf(st.getValue("REPLICATION"));
-      this.mtime = Long.valueOf(st.getValue("MTIME"));
-      this.atime = Long.valueOf(st.getValue("ATIME"));
-      this.blockSize = Long.valueOf(st.getValue("BLOCKSIZE"));
+      this.mtime = Long.parseLong(st.getValue("MTIME"));
+      this.atime = Long.parseLong(st.getValue("ATIME"));
+      this.blockSize = Long.parseLong(st.getValue("BLOCKSIZE"));
       this.clientName = st.getValue("CLIENT_NAME");
       this.clientMachine = st.getValue("CLIENT_MACHINE");
       if (st.hasChildren("BLOCK")) {
@@ -543,13 +660,14 @@ public abstract class FSEditLogOp {
         this.blocks = new Block[0];
       }
       this.permissions = permissionStatusFromXml(st);
+      aclEntries = readAclEntriesFromXml(st);
       readRpcIdsFromXml(st);
     }
   }
 
   /**
-   * {@literal @AtMostOnce} for {@link ClientProtocol#startFile} and
-   * {@link ClientProtocol#appendFile}
+   * {@literal @AtMostOnce} for {@link ClientProtocol#create} and
+   * {@link ClientProtocol#append}
    */
   static class AddOp extends AddCloseOp {
     private AddOp() {
@@ -828,7 +946,8 @@ public abstract class FSEditLogOp {
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
       this.path = FSImageSerialization.readString(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.replication = FSImageSerialization.readShort(in);
       } else {
         this.replication = readShort(in);
@@ -919,7 +1038,8 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (length < 3) { // trg, srcs.., timestamp
           throw new IOException("Incorrect data format " +
@@ -928,7 +1048,8 @@ public abstract class FSEditLogOp {
       }
       this.trg = FSImageSerialization.readString(in);
       int srcSize = 0;
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         srcSize = in.readInt();
       } else {
         srcSize = this.length - 1 - 1; // trg and timestamp
@@ -947,7 +1068,8 @@ public abstract class FSEditLogOp {
         srcs[i]= FSImageSerialization.readString(in);
       }
       
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.timestamp = FSImageSerialization.readLong(in);
       } else {
         this.timestamp = readLong(in);
@@ -979,10 +1101,10 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "TRG", trg);
       XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
-          Long.valueOf(timestamp).toString());
+          Long.toString(timestamp));
       contentHandler.startElement("", "", "SOURCES", new AttributesImpl());
       for (int i = 0; i < srcs.length; ++i) {
         XMLUtils.addSaxString(contentHandler,
@@ -993,9 +1115,9 @@ public abstract class FSEditLogOp {
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.trg = st.getValue("TRG");
-      this.timestamp = Long.valueOf(st.getValue("TIMESTAMP"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
       List<Stanza> sources = st.getChildren("SOURCES");
       int i = 0;
       while (true) {
@@ -1053,7 +1175,8 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (this.length != 3) {
           throw new IOException("Incorrect data format. "
@@ -1062,7 +1185,8 @@ public abstract class FSEditLogOp {
       }
       this.src = FSImageSerialization.readString(in);
       this.dst = FSImageSerialization.readString(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.timestamp = FSImageSerialization.readLong(in);
       } else {
         this.timestamp = readLong(in);
@@ -1095,20 +1219,20 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "SRC", src);
       XMLUtils.addSaxString(contentHandler, "DST", dst);
       XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
-          Long.valueOf(timestamp).toString());
+          Long.toString(timestamp));
       appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
     }
     
     @Override 
     void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.src = st.getValue("SRC");
       this.dst = st.getValue("DST");
-      this.timestamp = Long.valueOf(st.getValue("TIMESTAMP"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
       
       readRpcIdsFromXml(st);
     }
@@ -1149,14 +1273,16 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (this.length != 2) {
           throw new IOException("Incorrect data format. " + "delete operation.");
         }
       }
       this.path = FSImageSerialization.readString(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.timestamp = FSImageSerialization.readLong(in);
       } else {
         this.timestamp = readLong(in);
@@ -1186,17 +1312,17 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
-          Long.valueOf(timestamp).toString());
+          Long.toString(timestamp));
       appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.path = st.getValue("PATH");
-      this.timestamp = Long.valueOf(st.getValue("TIMESTAMP"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
       
       readRpcIdsFromXml(st);
     }
@@ -1209,6 +1335,7 @@ public abstract class FSEditLogOp {
     String path;
     long timestamp;
     PermissionStatus permissions;
+    List<AclEntry> aclEntries;
 
     private MkdirOp() {
       super(OP_MKDIR);
@@ -1238,6 +1365,11 @@ public abstract class FSEditLogOp {
       return this;
     }
 
+    MkdirOp setAclEntries(List<AclEntry> aclEntries) {
+      this.aclEntries = aclEntries;
+      return this;
+    }
+
     @Override
     public 
     void writeFields(DataOutputStream out) throws IOException {
@@ -1246,26 +1378,31 @@ public abstract class FSEditLogOp {
       FSImageSerialization.writeLong(timestamp, out); // mtime
       FSImageSerialization.writeLong(timestamp, out); // atime, unused at this
       permissions.write(out);
+      AclEditLogUtil.write(aclEntries, out);
     }
     
     @Override
     void readFields(DataInputStream in, int logVersion) throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
       }
       if (-17 < logVersion && length != 2 ||
           logVersion <= -17 && length != 3
-          && !LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+          && !NameNodeLayoutVersion.supports(
+              LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         throw new IOException("Incorrect data format. Mkdir operation.");
       }
-      if (LayoutVersion.supports(Feature.ADD_INODE_ID, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.ADD_INODE_ID, logVersion)) {
         this.inodeId = FSImageSerialization.readLong(in);
       } else {
         // This id should be updated when this editLogOp is applied
         this.inodeId = INodeId.GRANDFATHER_INODE_ID;
       }
       this.path = FSImageSerialization.readString(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.timestamp = FSImageSerialization.readLong(in);
       } else {
         this.timestamp = readLong(in);
@@ -1274,8 +1411,10 @@ public abstract class FSEditLogOp {
       // The disk format stores atimes for directories as well.
       // However, currently this is not being updated/used because of
       // performance reasons.
-      if (LayoutVersion.supports(Feature.FILE_ACCESS_TIME, logVersion)) {
-        if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.FILE_ACCESS_TIME, logVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
           FSImageSerialization.readLong(in);
         } else {
           readLong(in);
@@ -1283,6 +1422,7 @@ public abstract class FSEditLogOp {
       }
 
       this.permissions = PermissionStatus.read(in);
+      aclEntries = AclEditLogUtil.read(in, logVersion);
     }
 
     @Override
@@ -1298,6 +1438,8 @@ public abstract class FSEditLogOp {
       builder.append(timestamp);
       builder.append(", permissions=");
       builder.append(permissions);
+      builder.append(", aclEntries=");
+      builder.append(aclEntries);
       builder.append(", opCode=");
       builder.append(opCode);
       builder.append(", txid=");
@@ -1309,21 +1451,25 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "INODEID",
-          Long.valueOf(inodeId).toString());
+          Long.toString(inodeId));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
-          Long.valueOf(timestamp).toString());
+          Long.toString(timestamp));
       FSEditLogOp.permissionStatusToXml(contentHandler, permissions);
+      if (aclEntries != null) {
+        appendAclEntriesToXml(contentHandler, aclEntries);
+      }
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
-      this.inodeId = Long.valueOf(st.getValue("INODEID"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
+      this.inodeId = Long.parseLong(st.getValue("INODEID"));
       this.path = st.getValue("PATH");
-      this.timestamp = Long.valueOf(st.getValue("TIMESTAMP"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
       this.permissions = permissionStatusFromXml(st);
+      aclEntries = readAclEntriesFromXml(st);
     }
   }
 
@@ -1378,11 +1524,11 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "GENSTAMP",
-                            Long.valueOf(genStampV1).toString());
+                            Long.toString(genStampV1));
     }
 
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.genStampV1 = Long.valueOf(st.getValue("GENSTAMP"));
+      this.genStampV1 = Long.parseLong(st.getValue("GENSTAMP"));
     }
   }
 
@@ -1431,11 +1577,11 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "GENSTAMPV2",
-                            Long.valueOf(genStampV2).toString());
+                            Long.toString(genStampV2));
     }
 
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.genStampV2 = Long.valueOf(st.getValue("GENSTAMPV2"));
+      this.genStampV2 = Long.parseLong(st.getValue("GENSTAMPV2"));
     }
   }
 
@@ -1484,11 +1630,11 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "BLOCK_ID",
-                            Long.valueOf(blockId).toString());
+                            Long.toString(blockId));
     }
 
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.blockId = Long.valueOf(st.getValue("BLOCK_ID"));
+      this.blockId = Long.parseLong(st.getValue("BLOCK_ID"));
     }
   }
 
@@ -1684,12 +1830,12 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "SRC", src);
       XMLUtils.addSaxString(contentHandler, "NSQUOTA",
-          Long.valueOf(nsQuota).toString());
+          Long.toString(nsQuota));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.src = st.getValue("SRC");
-      this.nsQuota = Long.valueOf(st.getValue("NSQUOTA"));
+      this.nsQuota = Long.parseLong(st.getValue("NSQUOTA"));
     }
   }
 
@@ -1805,15 +1951,15 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "SRC", src);
       XMLUtils.addSaxString(contentHandler, "NSQUOTA",
-          Long.valueOf(nsQuota).toString());
+          Long.toString(nsQuota));
       XMLUtils.addSaxString(contentHandler, "DSQUOTA",
-          Long.valueOf(dsQuota).toString());
+          Long.toString(dsQuota));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.src = st.getValue("SRC");
-      this.nsQuota = Long.valueOf(st.getValue("NSQUOTA"));
-      this.dsQuota = Long.valueOf(st.getValue("DSQUOTA"));
+      this.nsQuota = Long.parseLong(st.getValue("NSQUOTA"));
+      this.dsQuota = Long.parseLong(st.getValue("DSQUOTA"));
     }
   }
 
@@ -1858,7 +2004,8 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (length != 3) {
           throw new IOException("Incorrect data format. " + "times operation.");
@@ -1866,7 +2013,8 @@ public abstract class FSEditLogOp {
       }
       this.path = FSImageSerialization.readString(in);
 
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.mtime = FSImageSerialization.readLong(in);
         this.atime = FSImageSerialization.readLong(in);
       } else {
@@ -1897,19 +2045,19 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "MTIME",
-          Long.valueOf(mtime).toString());
+          Long.toString(mtime));
       XMLUtils.addSaxString(contentHandler, "ATIME",
-          Long.valueOf(atime).toString());
+          Long.toString(atime));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.path = st.getValue("PATH");
-      this.mtime = Long.valueOf(st.getValue("MTIME"));
-      this.atime = Long.valueOf(st.getValue("ATIME"));
+      this.mtime = Long.parseLong(st.getValue("MTIME"));
+      this.atime = Long.parseLong(st.getValue("ATIME"));
     }
   }
 
@@ -1975,14 +2123,16 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (this.length != 4) {
           throw new IOException("Incorrect data format. "
               + "symlink operation.");
         }
       }
-      if (LayoutVersion.supports(Feature.ADD_INODE_ID, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.ADD_INODE_ID, logVersion)) {
         this.inodeId = FSImageSerialization.readLong(in);
       } else {
         // This id should be updated when the editLogOp is applied
@@ -1991,7 +2141,8 @@ public abstract class FSEditLogOp {
       this.path = FSImageSerialization.readString(in);
       this.value = FSImageSerialization.readString(in);
 
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.mtime = FSImageSerialization.readLong(in);
         this.atime = FSImageSerialization.readLong(in);
       } else {
@@ -2033,27 +2184,27 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "INODEID",
-          Long.valueOf(inodeId).toString());
+          Long.toString(inodeId));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "VALUE", value);
       XMLUtils.addSaxString(contentHandler, "MTIME",
-          Long.valueOf(mtime).toString());
+          Long.toString(mtime));
       XMLUtils.addSaxString(contentHandler, "ATIME",
-          Long.valueOf(atime).toString());
+          Long.toString(atime));
       FSEditLogOp.permissionStatusToXml(contentHandler, permissionStatus);
       appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
     }
 
     @Override 
     void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
-      this.inodeId = Long.valueOf(st.getValue("INODEID"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
+      this.inodeId = Long.parseLong(st.getValue("INODEID"));
       this.path = st.getValue("PATH");
       this.value = st.getValue("VALUE");
-      this.mtime = Long.valueOf(st.getValue("MTIME"));
-      this.atime = Long.valueOf(st.getValue("ATIME"));
+      this.mtime = Long.parseLong(st.getValue("MTIME"));
+      this.atime = Long.parseLong(st.getValue("ATIME"));
       this.permissionStatus = permissionStatusFromXml(st);
       
       readRpcIdsFromXml(st);
@@ -2109,7 +2260,8 @@ public abstract class FSEditLogOp {
     @Override
     void readFields(DataInputStream in, int logVersion)
         throws IOException {
-      if (!LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.length = in.readInt();
         if (this.length != 3) {
           throw new IOException("Incorrect data format. " + "Rename operation.");
@@ -2118,7 +2270,8 @@ public abstract class FSEditLogOp {
       this.src = FSImageSerialization.readString(in);
       this.dst = FSImageSerialization.readString(in);
 
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.timestamp = FSImageSerialization.readLong(in);
       } else {
         this.timestamp = readLong(in);
@@ -2175,11 +2328,11 @@ public abstract class FSEditLogOp {
     @Override
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "LENGTH",
-          Integer.valueOf(length).toString());
+          Integer.toString(length));
       XMLUtils.addSaxString(contentHandler, "SRC", src);
       XMLUtils.addSaxString(contentHandler, "DST", dst);
       XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
-          Long.valueOf(timestamp).toString());
+          Long.toString(timestamp));
       StringBuilder bld = new StringBuilder();
       String prefix = "";
       for (Rename r : options) {
@@ -2191,10 +2344,10 @@ public abstract class FSEditLogOp {
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
-      this.length = Integer.valueOf(st.getValue("LENGTH"));
+      this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.src = st.getValue("SRC");
       this.dst = st.getValue("DST");
-      this.timestamp = Long.valueOf(st.getValue("TIMESTAMP"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
       String opts = st.getValue("OPTIONS");
       String o[] = opts.split("\\|");
       this.options = new Rename[o.length];
@@ -2329,7 +2482,8 @@ public abstract class FSEditLogOp {
         throws IOException {
       this.token = new DelegationTokenIdentifier();
       this.token.readFields(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.expiryTime = FSImageSerialization.readLong(in);
       } else {
         this.expiryTime = readLong(in);
@@ -2355,13 +2509,13 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       FSEditLogOp.delegationTokenToXml(contentHandler, token);
       XMLUtils.addSaxString(contentHandler, "EXPIRY_TIME",
-          Long.valueOf(expiryTime).toString());
+          Long.toString(expiryTime));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.token = delegationTokenFromXml(st.getChildren(
           "DELEGATION_TOKEN_IDENTIFIER").get(0));
-      this.expiryTime = Long.valueOf(st.getValue("EXPIRY_TIME"));
+      this.expiryTime = Long.parseLong(st.getValue("EXPIRY_TIME"));
     }
   }
 
@@ -2401,7 +2555,8 @@ public abstract class FSEditLogOp {
         throws IOException {
       this.token = new DelegationTokenIdentifier();
       this.token.readFields(in);
-      if (LayoutVersion.supports(Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITLOG_OP_OPTIMIZATION, logVersion)) {
         this.expiryTime = FSImageSerialization.readLong(in);
       } else {
         this.expiryTime = readLong(in);
@@ -2427,13 +2582,13 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       FSEditLogOp.delegationTokenToXml(contentHandler, token);
       XMLUtils.addSaxString(contentHandler, "EXPIRY_TIME",
-          Long.valueOf(expiryTime).toString());
+          Long.toString(expiryTime));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.token = delegationTokenFromXml(st.getChildren(
           "DELEGATION_TOKEN_IDENTIFIER").get(0));
-      this.expiryTime = Long.valueOf(st.getValue("EXPIRY_TIME"));
+      this.expiryTime = Long.parseLong(st.getValue("EXPIRY_TIME"));
     }
   }
 
@@ -3336,6 +3491,53 @@ public abstract class FSEditLogOp {
     }
   }
 
+  static class SetAclOp extends FSEditLogOp {
+    List<AclEntry> aclEntries = Lists.newArrayList();
+    String src;
+
+    private SetAclOp() {
+      super(OP_SET_ACL);
+    }
+
+    static SetAclOp getInstance() {
+      return new SetAclOp();
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      AclEditLogProto p = AclEditLogProto.parseDelimitedFrom(in);
+      if (p == null) {
+        throw new IOException("Failed to read fields from SetAclOp");
+      }
+      src = p.getSrc();
+      aclEntries = PBHelper.convertAclEntry(p.getEntriesList());
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      AclEditLogProto.Builder b = AclEditLogProto.newBuilder();
+      if (src != null)
+        b.setSrc(src);
+      b.addAllEntries(PBHelper.convertAclEntryProto(aclEntries));
+      b.build().writeDelimitedTo(out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "SRC", src);
+      appendAclEntriesToXml(contentHandler, aclEntries);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      src = st.getValue("SRC");
+      aclEntries = readAclEntriesFromXml(st);
+      if (aclEntries == null) {
+        aclEntries = Lists.newArrayList();
+      }
+    }
+  }
+
   static private short readShort(DataInputStream in) throws IOException {
     return Short.parseShort(FSImageSerialization.readString(in));
   }
@@ -3381,6 +3583,65 @@ public abstract class FSEditLogOp {
       this.len = in.readLong();
     }
   }
+  /**
+   * Operation corresponding to upgrade
+   */
+  static class RollingUpgradeOp extends FSEditLogOp { // @Idempotent
+    private final String name;
+    private long time;
+
+    public RollingUpgradeOp(FSEditLogOpCodes code, String name) {
+      super(code);
+      this.name = name.toUpperCase();
+    }
+
+    static RollingUpgradeOp getStartInstance(OpInstanceCache cache) {
+      return (RollingUpgradeOp) cache.get(OP_ROLLING_UPGRADE_START);
+    }
+
+    static RollingUpgradeOp getFinalizeInstance(OpInstanceCache cache) {
+      return (RollingUpgradeOp) cache.get(OP_ROLLING_UPGRADE_FINALIZE);
+    }
+
+    long getTime() {
+      return time;
+    }
+
+    void setTime(long time) {
+      this.time = time;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      time = in.readLong();
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeLong(time, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, name + "TIME",
+          Long.toString(time));
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.time = Long.parseLong(st.getValue(name + "TIME"));
+    }
+
+    @Override
+    public String toString() {
+      return new StringBuilder().append("RollingUpgradeOp [").append(name)
+          .append(", time=").append(time).append("]").toString();
+    }
+    
+    static class RollbackException extends IOException {
+      private static final long serialVersionUID = 1L;
+    }
+  }
 
   /**
    * Class for writing editlog ops
@@ -3402,10 +3663,18 @@ public abstract class FSEditLogOp {
      */
     public void writeOp(FSEditLogOp op) throws IOException {
       int start = buf.getLength();
+      // write the op code first to make padding and terminator verification
+      // work
       buf.writeByte(op.opCode.getOpCode());
+      buf.writeInt(0); // write 0 for the length first
       buf.writeLong(op.txid);
       op.writeFields(buf);
       int end = buf.getLength();
+      
+      // write the length back: content of the op + 4 bytes checksum - op_code
+      int length = end - start - 1;
+      buf.writeInt(length, start + 1);
+
       checksum.reset();
       checksum.update(buf.getData(), start, end-start);
       int sum = (int)checksum.getValue();
@@ -3423,6 +3692,7 @@ public abstract class FSEditLogOp {
     private final Checksum checksum;
     private final OpInstanceCache cache;
     private int maxOpSize;
+    private final boolean supportEditLogLength;
 
     /**
      * Construct the reader
@@ -3431,11 +3701,18 @@ public abstract class FSEditLogOp {
      */
     public Reader(DataInputStream in, StreamLimiter limiter, int logVersion) {
       this.logVersion = logVersion;
-      if (LayoutVersion.supports(Feature.EDITS_CHESKUM, logVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITS_CHESKUM, logVersion)) {
         this.checksum = new PureJavaCrc32();
       } else {
         this.checksum = null;
       }
+      // It is possible that the logVersion is actually a future layoutversion
+      // during the rolling upgrade (e.g., the NN gets upgraded first). We
+      // assume future layout will also support length of editlog op.
+      this.supportEditLogLength = NameNodeLayoutVersion.supports(
+          NameNodeLayoutVersion.Feature.EDITLOG_LENGTH, logVersion)
+          || logVersion < NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
 
       if (this.checksum != null) {
         this.in = new DataInputStream(
@@ -3570,7 +3847,12 @@ public abstract class FSEditLogOp {
         throw new IOException("Read invalid opcode " + opCode);
       }
 
-      if (LayoutVersion.supports(Feature.STORED_TXIDS, logVersion)) {
+      if (supportEditLogLength) {
+        in.readInt();
+      }
+
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.STORED_TXIDS, logVersion)) {
         // Read the txid
         op.setTransactionId(in.readLong());
       } else {
@@ -3581,6 +3863,42 @@ public abstract class FSEditLogOp {
 
       validateChecksum(in, checksum, op.txid);
       return op;
+    }
+
+    /**
+     * Similar with decodeOp(), but instead of doing the real decoding, we skip
+     * the content of the op if the length of the editlog is supported.
+     * @return the last txid of the segment, or INVALID_TXID on exception
+     */
+    public long scanOp() throws IOException {
+      if (supportEditLogLength) {
+        limiter.setLimit(maxOpSize);
+        in.mark(maxOpSize);
+
+        final byte opCodeByte;
+        try {
+          opCodeByte = in.readByte(); // op code
+        } catch (EOFException e) {
+          return HdfsConstants.INVALID_TXID;
+        }
+
+        FSEditLogOpCodes opCode = FSEditLogOpCodes.fromByte(opCodeByte);
+        if (opCode == OP_INVALID) {
+          verifyTerminator();
+          return HdfsConstants.INVALID_TXID;
+        }
+
+        int length = in.readInt(); // read the length of the op
+        long txid = in.readLong(); // read the txid
+
+        // skip the remaining content
+        IOUtils.skipFully(in, length - 8); 
+        // TODO: do we want to verify checksum for JN? For now we don't.
+        return txid;
+      } else {
+        FSEditLogOp op = decodeOp();
+        return op == null ? HdfsConstants.INVALID_TXID : op.getTransactionId();
+      }
     }
 
     /**
@@ -3618,7 +3936,7 @@ public abstract class FSEditLogOp {
   abstract void fromXml(Stanza st) throws InvalidXmlException;
   
   public void decodeXml(Stanza st) throws InvalidXmlException {
-    this.txid = Long.valueOf(st.getValue("TXID"));
+    this.txid = Long.parseLong(st.getValue("TXID"));
     fromXml(st);
   }
   
@@ -3626,19 +3944,19 @@ public abstract class FSEditLogOp {
       throws SAXException {
     contentHandler.startElement("", "", "BLOCK", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "BLOCK_ID",
-        Long.valueOf(block.getBlockId()).toString());
+        Long.toString(block.getBlockId()));
     XMLUtils.addSaxString(contentHandler, "NUM_BYTES",
-        Long.valueOf(block.getNumBytes()).toString());
+        Long.toString(block.getNumBytes()));
     XMLUtils.addSaxString(contentHandler, "GENSTAMP",
-        Long.valueOf(block.getGenerationStamp()).toString());
+        Long.toString(block.getGenerationStamp()));
     contentHandler.endElement("", "", "BLOCK");
   }
 
   public static Block blockFromXml(Stanza st)
       throws InvalidXmlException {
-    long blockId = Long.valueOf(st.getValue("BLOCK_ID"));
-    long numBytes = Long.valueOf(st.getValue("NUM_BYTES"));
-    long generationStamp = Long.valueOf(st.getValue("GENSTAMP"));
+    long blockId = Long.parseLong(st.getValue("BLOCK_ID"));
+    long numBytes = Long.parseLong(st.getValue("NUM_BYTES"));
+    long generationStamp = Long.parseLong(st.getValue("GENSTAMP"));
     return new Block(blockId, numBytes, generationStamp);
   }
 
@@ -3647,7 +3965,7 @@ public abstract class FSEditLogOp {
     contentHandler.startElement("", "", "DELEGATION_TOKEN_IDENTIFIER", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "KIND", token.getKind().toString());
     XMLUtils.addSaxString(contentHandler, "SEQUENCE_NUMBER",
-        Integer.valueOf(token.getSequenceNumber()).toString());
+        Integer.toString(token.getSequenceNumber()));
     XMLUtils.addSaxString(contentHandler, "OWNER",
         token.getOwner().toString());
     XMLUtils.addSaxString(contentHandler, "RENEWER",
@@ -3655,11 +3973,11 @@ public abstract class FSEditLogOp {
     XMLUtils.addSaxString(contentHandler, "REALUSER",
         token.getRealUser().toString());
     XMLUtils.addSaxString(contentHandler, "ISSUE_DATE",
-        Long.valueOf(token.getIssueDate()).toString());
+        Long.toString(token.getIssueDate()));
     XMLUtils.addSaxString(contentHandler, "MAX_DATE",
-        Long.valueOf(token.getMaxDate()).toString());
+        Long.toString(token.getMaxDate()));
     XMLUtils.addSaxString(contentHandler, "MASTER_KEY_ID",
-        Integer.valueOf(token.getMasterKeyId()).toString());
+        Integer.toString(token.getMasterKeyId()));
     contentHandler.endElement("", "", "DELEGATION_TOKEN_IDENTIFIER");
   }
 
@@ -3671,13 +3989,13 @@ public abstract class FSEditLogOp {
       throw new InvalidXmlException("can't understand " +
         "DelegationTokenIdentifier KIND " + kind);
     }
-    int seqNum = Integer.valueOf(st.getValue("SEQUENCE_NUMBER"));
+    int seqNum = Integer.parseInt(st.getValue("SEQUENCE_NUMBER"));
     String owner = st.getValue("OWNER");
     String renewer = st.getValue("RENEWER");
     String realuser = st.getValue("REALUSER");
-    long issueDate = Long.valueOf(st.getValue("ISSUE_DATE"));
-    long maxDate = Long.valueOf(st.getValue("MAX_DATE"));
-    int masterKeyId = Integer.valueOf(st.getValue("MASTER_KEY_ID"));
+    long issueDate = Long.parseLong(st.getValue("ISSUE_DATE"));
+    long maxDate = Long.parseLong(st.getValue("MAX_DATE"));
+    int masterKeyId = Integer.parseInt(st.getValue("MASTER_KEY_ID"));
     DelegationTokenIdentifier token =
         new DelegationTokenIdentifier(new Text(owner),
             new Text(renewer), new Text(realuser));
@@ -3692,9 +4010,9 @@ public abstract class FSEditLogOp {
       DelegationKey key) throws SAXException {
     contentHandler.startElement("", "", "DELEGATION_KEY", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "KEY_ID",
-        Integer.valueOf(key.getKeyId()).toString());
+        Integer.toString(key.getKeyId()));
     XMLUtils.addSaxString(contentHandler, "EXPIRY_DATE",
-        Long.valueOf(key.getExpiryDate()).toString());
+        Long.toString(key.getExpiryDate()));
     if (key.getEncodedKey() != null) {
       XMLUtils.addSaxString(contentHandler, "KEY",
           Hex.encodeHexString(key.getEncodedKey()));
@@ -3704,8 +4022,8 @@ public abstract class FSEditLogOp {
   
   public static DelegationKey delegationKeyFromXml(Stanza st)
       throws InvalidXmlException {
-    int keyId = Integer.valueOf(st.getValue("KEY_ID"));
-    long expiryDate = Long.valueOf(st.getValue("EXPIRY_DATE"));
+    int keyId = Integer.parseInt(st.getValue("KEY_ID"));
+    long expiryDate = Long.parseLong(st.getValue("EXPIRY_DATE"));
     byte key[] = null;
     try {
       key = Hex.decodeHex(st.getValue("KEY").toCharArray());
@@ -3744,5 +4062,48 @@ public abstract class FSEditLogOp {
       throws InvalidXmlException {
     short mode = Short.valueOf(st.getValue("MODE"));
     return new FsPermission(mode);
+  }
+
+  private static void fsActionToXml(ContentHandler contentHandler, FsAction v)
+      throws SAXException {
+    XMLUtils.addSaxString(contentHandler, "PERM", v.SYMBOL);
+  }
+
+  private static FsAction fsActionFromXml(Stanza st) throws InvalidXmlException {
+    FsAction v = FSACTION_SYMBOL_MAP.get(st.getValue("PERM"));
+    if (v == null)
+      throw new InvalidXmlException("Invalid value for FsAction");
+    return v;
+  }
+
+  private static void appendAclEntriesToXml(ContentHandler contentHandler,
+      List<AclEntry> aclEntries) throws SAXException {
+    for (AclEntry e : aclEntries) {
+      contentHandler.startElement("", "", "ENTRY", new AttributesImpl());
+      XMLUtils.addSaxString(contentHandler, "SCOPE", e.getScope().name());
+      XMLUtils.addSaxString(contentHandler, "TYPE", e.getType().name());
+      if (e.getName() != null) {
+        XMLUtils.addSaxString(contentHandler, "NAME", e.getName());
+      }
+      fsActionToXml(contentHandler, e.getPermission());
+      contentHandler.endElement("", "", "ENTRY");
+    }
+  }
+
+  private static List<AclEntry> readAclEntriesFromXml(Stanza st) {
+    List<AclEntry> aclEntries = Lists.newArrayList();
+    if (!st.hasChildren("ENTRY"))
+      return null;
+
+    List<Stanza> stanzas = st.getChildren("ENTRY");
+    for (Stanza s : stanzas) {
+      AclEntry e = new AclEntry.Builder()
+        .setScope(AclEntryScope.valueOf(s.getValue("SCOPE")))
+        .setType(AclEntryType.valueOf(s.getValue("TYPE")))
+        .setName(s.getValueOrNull("NAME"))
+        .setPermission(fsActionFromXml(s)).build();
+      aclEntries.add(e);
+    }
+    return aclEntries;
   }
 }

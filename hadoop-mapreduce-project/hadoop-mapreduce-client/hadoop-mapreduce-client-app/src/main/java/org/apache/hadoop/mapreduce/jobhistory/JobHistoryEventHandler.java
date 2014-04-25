@@ -31,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
@@ -39,6 +40,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.Counter;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobCounter;
@@ -48,6 +50,8 @@ import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
+import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
 import org.apache.hadoop.mapreduce.v2.jobhistory.FileNameIndexUtils;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobIndexInfo;
@@ -343,11 +347,14 @@ public class JobHistoryEventHandler extends AbstractService
           LOG.warn("Found jobId " + toClose
             + " to have not been closed. Will close");
           //Create a JobFinishEvent so that it is written to the job history
+          final Job job = context.getJob(toClose);
           JobUnsuccessfulCompletionEvent jucEvent =
             new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(toClose),
-              System.currentTimeMillis(), context.getJob(toClose)
-              .getCompletedMaps(), context.getJob(toClose).getCompletedReduces(),
-              JobState.KILLED.toString());
+                System.currentTimeMillis(), job.getCompletedMaps(),
+                job.getCompletedReduces(),
+                createJobStateForJobUnsuccessfulCompletionEvent(
+                    mi.getForcedJobStateOnShutDown()),
+                job.getDiagnostics());
           JobHistoryEvent jfEvent = new JobHistoryEvent(toClose, jucEvent);
           //Bypass the queue mechanism which might wait. Call the method directly
           handleEvent(jfEvent);
@@ -379,9 +386,10 @@ public class JobHistoryEventHandler extends AbstractService
    * This should be the first call to history for a job
    * 
    * @param jobId the jobId.
+   * @param forcedJobStateOnShutDown
    * @throws IOException
    */
-  protected void setupEventWriter(JobId jobId)
+  protected void setupEventWriter(JobId jobId, String forcedJobStateOnShutDown)
       throws IOException {
     if (stagingDirPath == null) {
       LOG.error("Log Directory is null, returning");
@@ -435,8 +443,13 @@ public class JobHistoryEventHandler extends AbstractService
       }
     }
 
+    String queueName = JobConf.DEFAULT_QUEUE_NAME;
+    if (conf != null) {
+      queueName = conf.get(MRJobConfig.QUEUE_NAME, JobConf.DEFAULT_QUEUE_NAME);
+    }
+
     MetaInfo fi = new MetaInfo(historyFile, logDirConfPath, writer,
-        user, jobName, jobId);
+        user, jobName, jobId, forcedJobStateOnShutDown, queueName);
     fi.getJobSummary().setJobId(jobId);
     fileMap.put(jobId, fi);
   }
@@ -479,13 +492,17 @@ public class JobHistoryEventHandler extends AbstractService
     return false;
   }
 
-  protected void handleEvent(JobHistoryEvent event) {
+  @Private
+  public void handleEvent(JobHistoryEvent event) {
     synchronized (lock) {
 
       // If this is JobSubmitted Event, setup the writer
       if (event.getHistoryEvent().getEventType() == EventType.AM_STARTED) {
         try {
-          setupEventWriter(event.getJobID());
+          AMStartedEvent amStartedEvent =
+              (AMStartedEvent) event.getHistoryEvent();
+          setupEventWriter(event.getJobID(),
+              amStartedEvent.getForcedJobStateOnShutDown());
         } catch (IOException ioe) {
           LOG.error("Error JobHistoryEventHandler in handleEvent: " + event,
               ioe);
@@ -802,16 +819,20 @@ public class JobHistoryEventHandler extends AbstractService
     Timer flushTimer; 
     FlushTimerTask flushTimerTask;
     private boolean isTimerShutDown = false;
+    private String forcedJobStateOnShutDown;
 
     MetaInfo(Path historyFile, Path conf, EventWriter writer, String user,
-        String jobName, JobId jobId) {
+        String jobName, JobId jobId, String forcedJobStateOnShutDown,
+        String queueName) {
       this.historyFile = historyFile;
       this.confFile = conf;
       this.writer = writer;
       this.jobIndexInfo =
-          new JobIndexInfo(-1, -1, user, jobName, jobId, -1, -1, null);
+          new JobIndexInfo(-1, -1, user, jobName, jobId, -1, -1, null,
+                           queueName);
       this.jobSummary = new JobSummary();
       this.flushTimer = new Timer("FlushTimer", true);
+      this.forcedJobStateOnShutDown = forcedJobStateOnShutDown;
     }
 
     Path getHistoryFile() {
@@ -836,6 +857,10 @@ public class JobHistoryEventHandler extends AbstractService
     
     boolean isTimerShutDown() {
       return isTimerShutDown;
+    }
+
+    String getForcedJobStateOnShutDown() {
+      return forcedJobStateOnShutDown;
     }
 
     @Override
@@ -980,5 +1005,21 @@ public class JobHistoryEventHandler extends AbstractService
     this.forceJobCompletion = forceJobCompletion;
     LOG.info("JobHistoryEventHandler notified that forceJobCompletion is "
       + forceJobCompletion);
+  }
+
+  private String createJobStateForJobUnsuccessfulCompletionEvent(
+      String forcedJobStateOnShutDown) {
+    if (forcedJobStateOnShutDown == null || forcedJobStateOnShutDown
+        .isEmpty()) {
+      return JobState.KILLED.toString();
+    } else if (forcedJobStateOnShutDown.equals(
+        JobStateInternal.ERROR.toString()) ||
+        forcedJobStateOnShutDown.equals(JobStateInternal.FAILED.toString())) {
+      return JobState.FAILED.toString();
+    } else if (forcedJobStateOnShutDown.equals(JobStateInternal.SUCCEEDED
+        .toString())) {
+      return JobState.SUCCEEDED.toString();
+    }
+    return JobState.KILLED.toString();
   }
 }

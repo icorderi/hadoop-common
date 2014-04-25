@@ -55,6 +55,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.SafeModeInfo;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.io.IOUtils;
@@ -65,6 +66,7 @@ import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.internal.util.reflection.Whitebox;
 
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
@@ -124,6 +126,9 @@ public class TestHASafeMode {
     final Path test = new Path("/test");
     // let nn0 enter safemode
     NameNodeAdapter.enterSafeMode(nn0, false);
+    SafeModeInfo safeMode = (SafeModeInfo) Whitebox.getInternalState(
+        nn0.getNamesystem(), "safeMode");
+    Whitebox.setInternalState(safeMode, "extension", Integer.valueOf(30000));
     LOG.info("enter safemode");
     new Thread() {
       @Override
@@ -490,7 +495,8 @@ public class TestHASafeMode {
             "Safe mode is ON. The reported blocks " + safe + " has reached the "
             + "threshold 0.9990 of total blocks " + total + ". The number of "
             + "live datanodes " + numNodes + " has reached the minimum number "
-            + nodeThresh + ". Safe mode will be turned off automatically"));
+            + nodeThresh + ". In safe mode extension. "
+            + "Safe mode will be turned off automatically"));
     } else {
       int additional = total - safe;
       assertTrue("Bad safemode status: '" + status + "'",
@@ -560,8 +566,8 @@ public class TestHASafeMode {
       status.startsWith(
         "Safe mode is ON. The reported blocks 10 has reached the threshold "
         + "0.9990 of total blocks 10. The number of live datanodes 3 has "
-        + "reached the minimum number 0. Safe mode will be turned off "
-        + "automatically"));
+        + "reached the minimum number 0. In safe mode extension. "
+        + "Safe mode will be turned off automatically"));
 
     // Delete those blocks while the SBN is in safe mode.
     // Immediately roll the edit log before the actual deletions are sent
@@ -586,7 +592,16 @@ public class TestHASafeMode {
     // below 0.    
     assertSafeMode(nn1, 0, 0, 3, 0);
   }
-  
+
+  @Test
+  public void testSafeBlockTracking() throws Exception {
+    testSafeBlockTracking(false);
+  }
+
+  @Test
+  public void testSafeBlockTracking2() throws Exception {
+    testSafeBlockTracking(true);
+  }
 
   /**
    * Test that the number of safe blocks is accounted correctly even when
@@ -594,9 +609,15 @@ public class TestHASafeMode {
    * If a FINALIZED report arrives at the SBN before the block is marked
    * COMPLETE, then when we get the OP_CLOSE we need to count it as "safe"
    * at that point. This is a regression test for HDFS-2742.
+   * 
+   * @param noFirstBlockReport If this is set to true, we shutdown NN1 before
+   * closing the writing streams. In this way, when NN1 restarts, all DNs will
+   * first send it incremental block report before the first full block report.
+   * And NN1 will not treat the full block report as the first block report
+   * in BlockManager#processReport. 
    */
-  @Test
-  public void testSafeBlockTracking() throws Exception {
+  private void testSafeBlockTracking(boolean noFirstBlockReport)
+      throws Exception {
     banner("Starting with NN0 active and NN1 standby, creating some " +
     		"UC blocks plus some other blocks to force safemode");
     DFSTestUtil.createFile(fs, new Path("/other-blocks"), 10*BLOCK_SIZE, (short) 3, 1L);
@@ -613,6 +634,9 @@ public class TestHASafeMode {
       // the namespace during startup and enter safemode.
       nn0.getRpcServer().rollEditLog();
     } finally {
+      if (noFirstBlockReport) {
+        cluster.shutdownNameNode(1);
+      }
       for (FSDataOutputStream stm : stms) {
         IOUtils.closeStream(stm);
       }

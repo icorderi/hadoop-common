@@ -20,7 +20,12 @@ package org.apache.hadoop.yarn.server.resourcemanager.webapp;
 
 import static org.apache.hadoop.yarn.util.StringHelper.pajoin;
 
+import java.net.InetSocketAddress;
+
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.util.RMHAUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
@@ -28,12 +33,15 @@ import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.YarnWebParams;
 
+import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
+
 /**
  * The RM webapp
  */
 public class RMWebApp extends WebApp implements YarnWebParams {
 
   private final ResourceManager rm;
+  private boolean standby = false;
 
   public RMWebApp(ResourceManager rm) {
     this.rm = rm;
@@ -44,6 +52,8 @@ public class RMWebApp extends WebApp implements YarnWebParams {
     bind(JAXBContextResolver.class);
     bind(RMWebServices.class);
     bind(GenericExceptionHandler.class);
+    bind(RMWebApp.class).toInstance(this);
+
     if (rm != null) {
       bind(ResourceManager.class).toInstance(rm);
       bind(RMContext.class).toInstance(rm.getRMContext());
@@ -58,5 +68,51 @@ public class RMWebApp extends WebApp implements YarnWebParams {
     route(pajoin("/app", APPLICATION_ID), RmController.class, "app");
     route("/scheduler", RmController.class, "scheduler");
     route(pajoin("/queue", QUEUE_NAME), RmController.class, "queue");
+  }
+
+  @Override
+  protected Class<? extends GuiceContainer> getWebAppFilterClass() {
+    return RMWebAppFilter.class;
+  }
+
+  public void checkIfStandbyRM() {
+    standby = (rm.getRMContext().getHAServiceState() == HAServiceState.STANDBY);
+  }
+
+  public boolean isStandby() {
+    return standby;
+  }
+
+  @Override
+  public String getRedirectPath() {
+    if (standby) {
+      return buildRedirectPath();
+    } else
+      return super.getRedirectPath();
+  }
+
+  private String buildRedirectPath() {
+    // make a copy of the original configuration so not to mutate it. Also use
+    // an YarnConfiguration to force loading of yarn-site.xml.
+    YarnConfiguration yarnConf = new YarnConfiguration(rm.getConfig());
+    String activeRMHAId = RMHAUtils.findActiveRMHAId(yarnConf);
+    String path = "";
+    if (activeRMHAId != null) {
+      yarnConf.set(YarnConfiguration.RM_HA_ID, activeRMHAId);
+
+      InetSocketAddress sock = YarnConfiguration.useHttps(yarnConf)
+          ? yarnConf.getSocketAddr(YarnConfiguration.RM_WEBAPP_HTTPS_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_PORT)
+          : yarnConf.getSocketAddr(YarnConfiguration.RM_WEBAPP_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_PORT);
+
+      path = sock.getHostName() + ":" + Integer.toString(sock.getPort());
+      path = YarnConfiguration.useHttps(yarnConf)
+          ? "https://" + path
+          : "http://" + path;
+    }
+    return path;
   }
 }

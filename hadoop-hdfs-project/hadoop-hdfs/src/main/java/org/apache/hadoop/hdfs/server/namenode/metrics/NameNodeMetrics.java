@@ -73,16 +73,18 @@ public class NameNodeMetrics {
   MutableCounterLong snapshotDiffReportOps;
   @Metric("Number of blockReceivedAndDeleted calls")
   MutableCounterLong blockReceivedAndDeletedOps;
+  @Metric("Number of blockReports from individual storages")
+  MutableCounterLong storageBlockReportOps;
 
   @Metric("Journal transactions") MutableRate transactions;
   @Metric("Journal syncs") MutableRate syncs;
-  MutableQuantiles[] syncsQuantiles;
+  final MutableQuantiles[] syncsQuantiles;
   @Metric("Journal transactions batched in sync")
   MutableCounterLong transactionsBatchedInSync;
   @Metric("Block report") MutableRate blockReport;
-  MutableQuantiles[] blockReportQuantiles;
+  final MutableQuantiles[] blockReportQuantiles;
   @Metric("Cache report") MutableRate cacheReport;
-  MutableQuantiles[] cacheReportQuantiles;
+  final MutableQuantiles[] cacheReportQuantiles;
 
   @Metric("Duration in SafeMode at startup in msec")
   MutableGaugeInt safeModeTime;
@@ -220,6 +222,10 @@ public class NameNodeMetrics {
   
   public void incrBlockReceivedAndDeletedOps() {
     blockReceivedAndDeletedOps.incr();
+  }
+  
+  public void incrStorageBlockReportOps() {
+    storageBlockReportOps.incr();
   }
 
   public void addTransaction(long latency) {

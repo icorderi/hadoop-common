@@ -32,6 +32,10 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
@@ -40,6 +44,10 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationRequest;
@@ -48,6 +56,7 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetQueueInfoRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetQueueUserAclsInfoRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.MoveApplicationAcrossQueuesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
@@ -68,6 +77,7 @@ import org.apache.hadoop.yarn.client.api.AHSClient;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.client.api.YarnClientApplication;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationIdNotProvidedException;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
@@ -113,8 +123,8 @@ public class YarnClientImpl extends YarnClient {
         YarnConfiguration.DEFAULT_YARN_CLIENT_APPLICATION_CLIENT_PROTOCOL_POLL_INTERVAL_MS);
     }
 
-    if (conf.getBoolean(YarnConfiguration.YARN_HISTORY_SERVICE_ENABLED,
-      YarnConfiguration.DEFAULT_YARN_HISTORY_SERVICE_ENABLED)) {
+    if (conf.getBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+      YarnConfiguration.DEFAULT_APPLICATION_HISTORY_ENABLED)) {
       historyServiceEnabled = true;
       historyClient = AHSClientImpl.createAHSClient();
       historyClient.init(getConfig());
@@ -171,43 +181,57 @@ public class YarnClientImpl extends YarnClient {
       submitApplication(ApplicationSubmissionContext appContext)
           throws YarnException, IOException {
     ApplicationId applicationId = appContext.getApplicationId();
-    appContext.setApplicationId(applicationId);
+    if (applicationId == null) {
+      throw new ApplicationIdNotProvidedException(
+          "ApplicationId is not provided in ApplicationSubmissionContext");
+    }
     SubmitApplicationRequest request =
         Records.newRecord(SubmitApplicationRequest.class);
     request.setApplicationSubmissionContext(appContext);
+
+    //TODO: YARN-1763:Handle RM failovers during the submitApplication call.
     rmClient.submitApplication(request);
 
     int pollCount = 0;
     long startTime = System.currentTimeMillis();
 
     while (true) {
-      YarnApplicationState state =
-          getApplicationReport(applicationId).getYarnApplicationState();
-      if (!state.equals(YarnApplicationState.NEW) &&
-          !state.equals(YarnApplicationState.NEW_SAVING)) {
-        LOG.info("Submitted application " + applicationId);
-        break;
-      }
-
-      long elapsedMillis = System.currentTimeMillis() - startTime;
-      if (enforceAsyncAPITimeout() &&
-          elapsedMillis >= asyncApiPollTimeoutMillis) {
-        throw new YarnException("Timed out while waiting for application " +
-          applicationId + " to be submitted successfully");
-      }
-
-      // Notify the client through the log every 10 poll, in case the client
-      // is blocked here too long.
-      if (++pollCount % 10 == 0) {
-        LOG.info("Application submission is not finished, " +
-            "submitted application " + applicationId +
-            " is still in " + state);
-      }
       try {
-        Thread.sleep(submitPollIntervalMillis);
-      } catch (InterruptedException ie) {
-        LOG.error("Interrupted while waiting for application " + applicationId
-            + " to be successfully submitted.");
+        YarnApplicationState state =
+            getApplicationReport(applicationId).getYarnApplicationState();
+        if (!state.equals(YarnApplicationState.NEW) &&
+            !state.equals(YarnApplicationState.NEW_SAVING)) {
+          LOG.info("Submitted application " + applicationId);
+          break;
+        }
+
+        long elapsedMillis = System.currentTimeMillis() - startTime;
+        if (enforceAsyncAPITimeout() &&
+            elapsedMillis >= asyncApiPollTimeoutMillis) {
+          throw new YarnException("Timed out while waiting for application " +
+              applicationId + " to be submitted successfully");
+        }
+
+        // Notify the client through the log every 10 poll, in case the client
+        // is blocked here too long.
+        if (++pollCount % 10 == 0) {
+          LOG.info("Application submission is not finished, " +
+              "submitted application " + applicationId +
+              " is still in " + state);
+        }
+        try {
+          Thread.sleep(submitPollIntervalMillis);
+        } catch (InterruptedException ie) {
+          LOG.error("Interrupted while waiting for application "
+              + applicationId
+              + " to be successfully submitted.");
+        }
+      } catch (ApplicationNotFoundException ex) {
+        // FailOver or RM restart happens before RMStateStore saves
+        // ApplicationState
+        LOG.info("Re-submit application " + applicationId + "with the " +
+            "same ApplicationSubmissionContext");
+        rmClient.submitApplication(request);
       }
     }
 
@@ -266,18 +290,15 @@ public class YarnClientImpl extends YarnClient {
       request.setApplicationId(appId);
       response = rmClient.getApplicationReport(request);
     } catch (YarnException e) {
-
       if (!historyServiceEnabled) {
         // Just throw it as usual if historyService is not enabled.
         throw e;
       }
-
       // Even if history-service is enabled, treat all exceptions still the same
       // except the following
       if (!(e.getClass() == ApplicationNotFoundException.class)) {
         throw e;
       }
-
       return historyClient.getApplicationReport(appId);
     }
     return response.getApplicationReport();
@@ -289,7 +310,7 @@ public class YarnClientImpl extends YarnClient {
     org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> amrmToken =
         null;
     if (token != null) {
-      amrmToken = ConverterUtils.convertFromYarn(token, null);
+      amrmToken = ConverterUtils.convertFromYarn(token, (Text) null);
     }
     return amrmToken;
   }
@@ -445,37 +466,104 @@ public class YarnClientImpl extends YarnClient {
   @Override
   public ApplicationAttemptReport getApplicationAttemptReport(
       ApplicationAttemptId appAttemptId) throws YarnException, IOException {
-    if (historyServiceEnabled) {
+    try {
+      GetApplicationAttemptReportRequest request = Records
+          .newRecord(GetApplicationAttemptReportRequest.class);
+      request.setApplicationAttemptId(appAttemptId);
+      GetApplicationAttemptReportResponse response = rmClient
+          .getApplicationAttemptReport(request);
+      return response.getApplicationAttemptReport();
+    } catch (YarnException e) {
+      if (!historyServiceEnabled) {
+        // Just throw it as usual if historyService is not enabled.
+        throw e;
+      }
+      // Even if history-service is enabled, treat all exceptions still the same
+      // except the following
+      if (e.getClass() != ApplicationNotFoundException.class) {
+        throw e;
+      }
       return historyClient.getApplicationAttemptReport(appAttemptId);
     }
-    throw new YarnException("History service is not enabled.");
   }
 
   @Override
   public List<ApplicationAttemptReport> getApplicationAttempts(
       ApplicationId appId) throws YarnException, IOException {
-    if (historyServiceEnabled) {
+    try {
+      GetApplicationAttemptsRequest request = Records
+          .newRecord(GetApplicationAttemptsRequest.class);
+      request.setApplicationId(appId);
+      GetApplicationAttemptsResponse response = rmClient
+          .getApplicationAttempts(request);
+      return response.getApplicationAttemptList();
+    } catch (YarnException e) {
+      if (!historyServiceEnabled) {
+        // Just throw it as usual if historyService is not enabled.
+        throw e;
+      }
+      // Even if history-service is enabled, treat all exceptions still the same
+      // except the following
+      if (e.getClass() != ApplicationNotFoundException.class) {
+        throw e;
+      }
       return historyClient.getApplicationAttempts(appId);
     }
-    throw new YarnException("History service is not enabled.");
   }
 
   @Override
   public ContainerReport getContainerReport(ContainerId containerId)
       throws YarnException, IOException {
-    if (historyServiceEnabled) {
+    try {
+      GetContainerReportRequest request = Records
+          .newRecord(GetContainerReportRequest.class);
+      request.setContainerId(containerId);
+      GetContainerReportResponse response = rmClient
+          .getContainerReport(request);
+      return response.getContainerReport();
+    } catch (YarnException e) {
+      if (!historyServiceEnabled) {
+        // Just throw it as usual if historyService is not enabled.
+        throw e;
+      }
+      // Even if history-service is enabled, treat all exceptions still the same
+      // except the following
+      if (e.getClass() != ApplicationNotFoundException.class) {
+        throw e;
+      }
       return historyClient.getContainerReport(containerId);
     }
-    throw new YarnException("History service is not enabled.");
   }
 
   @Override
   public List<ContainerReport> getContainers(
       ApplicationAttemptId applicationAttemptId) throws YarnException,
       IOException {
-    if (historyServiceEnabled) {
+    try {
+      GetContainersRequest request = Records
+          .newRecord(GetContainersRequest.class);
+      request.setApplicationAttemptId(applicationAttemptId);
+      GetContainersResponse response = rmClient.getContainers(request);
+      return response.getContainerList();
+    } catch (YarnException e) {
+      if (!historyServiceEnabled) {
+        // Just throw it as usual if historyService is not enabled.
+        throw e;
+      }
+      // Even if history-service is enabled, treat all exceptions still the same
+      // except the following
+      if (e.getClass() != ApplicationNotFoundException.class) {
+        throw e;
+      }
       return historyClient.getContainers(applicationAttemptId);
     }
-    throw new YarnException("History service is not enabled.");
+  }
+
+  @Override
+  public void moveApplicationAcrossQueues(ApplicationId appId,
+      String queue) throws YarnException, IOException {
+    MoveApplicationAcrossQueuesRequest request =
+        MoveApplicationAcrossQueuesRequest.newInstance(appId, queue);
+    rmClient.moveApplicationAcrossQueues(request);
   }
 }

@@ -39,8 +39,8 @@ import org.apache.hadoop.security.KerberosInfo;
  *
  **********************************************************************/
 @KerberosInfo(
-    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY, 
-    clientPrincipal = DFSConfigKeys.DFS_DATANODE_USER_NAME_KEY)
+    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, 
+    clientPrincipal = DFSConfigKeys.DFS_DATANODE_KERBEROS_PRINCIPAL_KEY)
 @InterfaceAudience.Private
 public interface DatanodeProtocol {
   /**
@@ -119,9 +119,9 @@ public interface DatanodeProtocol {
    * and should be deleted.  This function is meant to upload *all*
    * the locally-stored blocks.  It's invoked upon startup and then
    * infrequently afterwards.
-   * @param registration
-   * @param poolId - the block pool ID for the blocks
-   * @param reports - report of blocks per storage
+   * @param registration datanode registration
+   * @param poolId the block pool ID for the blocks
+   * @param reports report of blocks per storage
    *     Each finalized block is represented as 3 longs. Each under-
    *     construction replica is represented as 4 longs.
    *     This is done instead of Block[] to reduce memory used by block reports.

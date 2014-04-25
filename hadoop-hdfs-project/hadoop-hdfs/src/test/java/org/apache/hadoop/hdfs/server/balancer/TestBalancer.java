@@ -74,7 +74,7 @@ public class TestBalancer {
 
   ClientProtocol client;
 
-  static final long TIMEOUT = 20000L; //msec
+  static final long TIMEOUT = 40000L; //msec
   static final double CAPACITY_ALLOWED_VARIANCE = 0.005;  // 0.5%
   static final double BALANCE_ALLOWED_VARIANCE = 0.11;    // 10%+delta
   static final int DEFAULT_BLOCK_SIZE = 10;
@@ -209,7 +209,7 @@ public class TestBalancer {
         ClientProtocol.class).getProxy();
 
     for(int i = 0; i < blocksDN.length; i++)
-      cluster.injectBlocks(i, Arrays.asList(blocksDN[i]));
+      cluster.injectBlocks(i, Arrays.asList(blocksDN[i]), null);
 
     final long totalCapacity = sum(capacities);
     runBalancer(conf, totalUsedSpace, totalCapacity);

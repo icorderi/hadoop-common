@@ -39,7 +39,7 @@ public class JournalNodeHttpServer {
   public static final String JN_ATTRIBUTE_KEY = "localjournal";
 
   private HttpServer2 httpServer;
-  private JournalNode localJournalNode;
+  private final JournalNode localJournalNode;
 
   private final Configuration conf;
 
@@ -58,7 +58,7 @@ public class JournalNodeHttpServer {
 
     HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
         httpAddr, httpsAddr, "journal",
-        DFSConfigKeys.DFS_JOURNALNODE_INTERNAL_SPNEGO_USER_NAME_KEY,
+        DFSConfigKeys.DFS_JOURNALNODE_KERBEROS_INTERNAL_SPNEGO_PRINCIPAL_KEY,
         DFSConfigKeys.DFS_JOURNALNODE_KEYTAB_FILE_KEY);
 
     httpServer = builder.build();

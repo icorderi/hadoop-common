@@ -17,28 +17,6 @@
  */
 package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.RandomAccessFile;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.Executor;
-
-import javax.management.NotCompliantMBeanException;
-import javax.management.ObjectName;
-import javax.management.StandardMBean;
-
-import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -46,37 +24,12 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.StorageType;
-import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
-import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsBlocksMetadata;
-import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
 import org.apache.hadoop.hdfs.server.common.Storage;
-import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
-import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
-import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.datanode.DataStorage;
-import org.apache.hadoop.hdfs.server.datanode.FinalizedReplica;
-import org.apache.hadoop.hdfs.server.datanode.Replica;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaAlreadyExistsException;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaBeingWritten;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipeline;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaNotFoundException;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaUnderRecovery;
-import org.apache.hadoop.hdfs.server.datanode.ReplicaWaitingToBeRecovered;
-import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.LengthInputStream;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.ReplicaInputStreams;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.ReplicaOutputStreams;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.RollingLogs;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.RoundRobinVolumeChoosingPolicy;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.VolumeChoosingPolicy;
+import org.apache.hadoop.hdfs.server.datanode.*;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.*;
 import org.apache.hadoop.hdfs.server.datanode.metrics.FSDatasetMBean;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
@@ -89,6 +42,15 @@ import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Time;
+
+import javax.management.NotCompliantMBeanException;
+import javax.management.ObjectName;
+import javax.management.StandardMBean;
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.*;
+import java.util.concurrent.Executor;
 
 /**************************************************
  * FSDataset manages a set of data blocks.  Each block
@@ -111,6 +73,11 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   @Override // FsDatasetSpi
   public List<FsVolumeImpl> getVolumes() {
     return volumes.volumes;
+  }
+
+  @Override
+  public DatanodeStorage getStorage(final String storageUuid) {
+    return storageMap.get(storageUuid);
   }
 
   @Override // FsDatasetSpi
@@ -153,10 +120,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
 
 
   /**
-   * Returns a clone of a replica stored in data-node memory.
-   * Should be primarily used for testing.
-   * @param blockId
-   * @return
+   * This should be primarily used for testing.
+   * @return clone of replica store in datanode memory
    */
   ReplicaInfo fetchReplicaInfo(String bpid, long blockId) {
     ReplicaInfo r = volumeMap.get(bpid, blockId);
@@ -193,7 +158,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
     
   final DataNode datanode;
+  final DataStorage dataStorage;
   final FsVolumeList volumes;
+  final Map<String, DatanodeStorage> storageMap;
   final FsDatasetAsyncDiskService asyncDiskService;
   final FsDatasetCache cacheManager;
   private final int validVolsRequired;
@@ -209,6 +176,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   FsDatasetImpl(DataNode datanode, DataStorage storage, Configuration conf
       ) throws IOException {
     this.datanode = datanode;
+    this.dataStorage = storage;
     // The number of volumes required for operation is the total number 
     // of volumes minus the number of failed volumes we can tolerate.
     final int volFailuresTolerated =
@@ -234,6 +202,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
           + ", volume failures tolerated: " + volFailuresTolerated);
     }
 
+    storageMap = new HashMap<String, DatanodeStorage>();
     final List<FsVolumeImpl> volArray = new ArrayList<FsVolumeImpl>(
         storage.getNumStorageDirs());
     for (int idx = 0; idx < storage.getNumStorageDirs(); idx++) {
@@ -243,6 +212,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
       volArray.add(new FsVolumeImpl(this, sd.getStorageUuid(), dir, conf,
           storageType));
       LOG.info("Added volume - " + dir + ", StorageType: " + storageType);
+      storageMap.put(sd.getStorageUuid(),
+          new DatanodeStorage(sd.getStorageUuid(), DatanodeStorage.State.NORMAL, storageType));
     }
     volumeMap = new ReplicaMap(this);
 
@@ -591,7 +562,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    * @param bpid block pool Id
    * @param replicaInfo a finalized replica
    * @param newGS new generation stamp
-   * @param estimateBlockLen estimate generation stamp
+   * @param estimateBlockLen estimate block length
    * @return a RBW replica
    * @throws IOException if moving the replica from finalized directory 
    *         to rbw directory fails
@@ -1179,43 +1150,39 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    */
   @Override // FsDatasetSpi
   public void invalidate(String bpid, Block invalidBlks[]) throws IOException {
-    boolean error = false;
+    final List<String> errors = new ArrayList<String>();
     for (int i = 0; i < invalidBlks.length; i++) {
       final File f;
       final FsVolumeImpl v;
       synchronized (this) {
-        f = getFile(bpid, invalidBlks[i].getBlockId());
-        ReplicaInfo info = volumeMap.get(bpid, invalidBlks[i]);
+        final ReplicaInfo info = volumeMap.get(bpid, invalidBlks[i]);
         if (info == null) {
-          LOG.warn("Failed to delete replica " + invalidBlks[i]
+          // It is okay if the block is not found -- it may be deleted earlier.
+          LOG.info("Failed to delete replica " + invalidBlks[i]
               + ": ReplicaInfo not found.");
-          error = true;
           continue;
         }
         if (info.getGenerationStamp() != invalidBlks[i].getGenerationStamp()) {
-          LOG.warn("Failed to delete replica " + invalidBlks[i]
+          errors.add("Failed to delete replica " + invalidBlks[i]
               + ": GenerationStamp not matched, info=" + info);
-          error = true;
           continue;
         }
+        f = info.getBlockFile();
         v = (FsVolumeImpl)info.getVolume();
         if (f == null) {
-          LOG.warn("Failed to delete replica " + invalidBlks[i]
+          errors.add("Failed to delete replica " + invalidBlks[i]
               +  ": File not found, volume=" + v);
-          error = true;
           continue;
         }
         if (v == null) {
-          LOG.warn("Failed to delete replica " + invalidBlks[i]
-              +  ". No volume for this replica, file=" + f + ".");
-          error = true;
+          errors.add("Failed to delete replica " + invalidBlks[i]
+              +  ". No volume for this replica, file=" + f);
           continue;
         }
         File parent = f.getParentFile();
         if (parent == null) {
-          LOG.warn("Failed to delete replica " + invalidBlks[i]
-              +  ". Parent not found for file " + f + ".");
-          error = true;
+          errors.add("Failed to delete replica " + invalidBlks[i]
+              +  ". Parent not found for file " + f);
           continue;
         }
         ReplicaState replicaState = info.getState();
@@ -1234,10 +1201,17 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
       // finishes.
       asyncDiskService.deleteAsync(v, f,
           FsDatasetUtil.getMetaFile(f, invalidBlks[i].getGenerationStamp()),
-          new ExtendedBlock(bpid, invalidBlks[i]));
+          new ExtendedBlock(bpid, invalidBlks[i]),
+          dataStorage.getTrashDirectoryForBlockFile(bpid, f));
     }
-    if (error) {
-      throw new IOException("Error in deleting blocks.");
+    if (!errors.isEmpty()) {
+      StringBuilder b = new StringBuilder("Failed to delete ")
+        .append(errors.size()).append(" (out of ").append(invalidBlks.length)
+        .append(") replica(s):");
+      for(int i = 0; i < errors.size(); i++) {
+        b.append("\n").append(i).append(") ").append(errors.get(i));
+      }
+      throw new IOException(b.toString());
     }
   }
 
@@ -1304,6 +1278,10 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     for (int i=0; i < blockIds.length; i++) {
       cacheManager.uncacheBlock(bpid, blockIds[i]);
     }
+  }
+
+  public boolean isCached(String bpid, long blockId) {
+    return cacheManager.isCached(bpid, blockId);
   }
 
   @Override // FsDatasetSpi
@@ -1601,7 +1579,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         datanode.getDnConf().getXceiverStopTimeout());
   }
 
-  /** static version of {@link #initReplicaRecovery(Block, long)}. */
+  /** static version of {@link #initReplicaRecovery(RecoveringBlock)}. */
   static ReplicaRecoveryInfo initReplicaRecovery(String bpid, ReplicaMap map,
       Block block, long recoveryId, long xceiverStopTimeout) throws IOException {
     final ReplicaInfo replica = map.get(bpid, block.getBlockId());
@@ -1762,11 +1740,13 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
   
   @Override
-  public synchronized void addBlockPool(String bpid, Configuration conf)
+  public void addBlockPool(String bpid, Configuration conf)
       throws IOException {
     LOG.info("Adding block pool " + bpid);
-    volumes.addBlockPool(bpid, conf);
-    volumeMap.initBlockPool(bpid);
+    synchronized(this) {
+      volumes.addBlockPool(bpid, conf);
+      volumeMap.initBlockPool(bpid);
+    }
     volumes.getAllVolumesMap(bpid, volumeMap);
   }
 
@@ -1855,31 +1835,35 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
 
   @Override // FsDatasetSpi
-  public HdfsBlocksMetadata getHdfsBlocksMetadata(List<ExtendedBlock> blocks)
-      throws IOException {
+  public HdfsBlocksMetadata getHdfsBlocksMetadata(String poolId,
+      long[] blockIds) throws IOException {
     // List of VolumeIds, one per volume on the datanode
     List<byte[]> blocksVolumeIds = new ArrayList<byte[]>(volumes.volumes.size());
     // List of indexes into the list of VolumeIds, pointing at the VolumeId of
     // the volume that the block is on
-    List<Integer> blocksVolumeIndexes = new ArrayList<Integer>(blocks.size());
+    List<Integer> blocksVolumeIndexes = new ArrayList<Integer>(blockIds.length);
     // Initialize the list of VolumeIds simply by enumerating the volumes
     for (int i = 0; i < volumes.volumes.size(); i++) {
       blocksVolumeIds.add(ByteBuffer.allocate(4).putInt(i).array());
     }
     // Determine the index of the VolumeId of each block's volume, by comparing 
     // the block's volume against the enumerated volumes
-    for (int i = 0; i < blocks.size(); i++) {
-      ExtendedBlock block = blocks.get(i);
-      FsVolumeSpi blockVolume = getReplicaInfo(block).getVolume();
+    for (int i = 0; i < blockIds.length; i++) {
+      long blockId = blockIds[i];
       boolean isValid = false;
+
+      ReplicaInfo info = volumeMap.get(poolId, blockId);
       int volumeIndex = 0;
-      for (FsVolumeImpl volume : volumes.volumes) {
-        // This comparison of references should be safe
-        if (blockVolume == volume) {
-          isValid = true;
-          break;
+      if (info != null) {
+        FsVolumeSpi blockVolume = info.getVolume();
+        for (FsVolumeImpl volume : volumes.volumes) {
+          // This comparison of references should be safe
+          if (blockVolume == volume) {
+            isValid = true;
+            break;
+          }
+          volumeIndex++;
         }
-        volumeIndex++;
       }
       // Indicates that the block is not present, or not found in a data dir
       if (!isValid) {
@@ -1887,8 +1871,23 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
       }
       blocksVolumeIndexes.add(volumeIndex);
     }
-    return new HdfsBlocksMetadata(blocks.toArray(new ExtendedBlock[] {}), 
+    return new HdfsBlocksMetadata(poolId, blockIds,
         blocksVolumeIds, blocksVolumeIndexes);
+  }
+
+  @Override
+  public void enableTrash(String bpid) {
+    dataStorage.enableTrash(bpid);
+  }
+
+  @Override
+  public void restoreTrash(String bpid) {
+    dataStorage.restoreTrash(bpid);
+  }
+
+  @Override
+  public boolean trashEnabled(String bpid) {
+    return dataStorage.trashEnabled(bpid);
   }
 
   @Override

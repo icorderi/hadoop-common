@@ -20,10 +20,12 @@ package org.apache.hadoop.ipc;
 
 import java.util.Arrays;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.ipc.metrics.RetryCacheMetrics;
 import org.apache.hadoop.util.LightWeightCache;
 import org.apache.hadoop.util.LightWeightGSet;
 import org.apache.hadoop.util.LightWeightGSet.LinkedElement;
@@ -43,6 +45,8 @@ import com.google.common.base.Preconditions;
 @InterfaceAudience.Private
 public class RetryCache {
   public static final Log LOG = LogFactory.getLog(RetryCache.class);
+  private final RetryCacheMetrics retryCacheMetrics;
+
   /**
    * CacheEntry is tracked using unique client ID and callId of the RPC request
    */
@@ -178,6 +182,9 @@ public class RetryCache {
 
   private final LightWeightGSet<CacheEntry, CacheEntry> set;
   private final long expirationTime;
+  private String cacheName;
+
+  private final ReentrantLock lock = new ReentrantLock();
 
   /**
    * Constructor
@@ -191,6 +198,8 @@ public class RetryCache {
     this.set = new LightWeightCache<CacheEntry, CacheEntry>(capacity, capacity,
         expirationTime, 0);
     this.expirationTime = expirationTime;
+    this.cacheName = cacheName;
+    this.retryCacheMetrics =  RetryCacheMetrics.create(this);
   }
 
   private static boolean skipRetryCache() {
@@ -199,10 +208,34 @@ public class RetryCache {
     return !Server.isRpcInvocation() || Server.getCallId() < 0
         || Arrays.equals(Server.getClientId(), RpcConstants.DUMMY_CLIENT_ID);
   }
-  
+
+  public void lock() {
+    this.lock.lock();
+  }
+
+  public void unlock() {
+    this.lock.unlock();
+  }
+
+  private void incrCacheClearedCounter() {
+    retryCacheMetrics.incrCacheCleared();
+  }
+
   @VisibleForTesting
   public LightWeightGSet<CacheEntry, CacheEntry> getCacheSet() {
     return set;
+  }
+
+  @VisibleForTesting
+  public RetryCacheMetrics getMetricsForTests() {
+    return retryCacheMetrics;
+  }
+
+  /**
+   * This method returns cache name for metrics.
+   */
+  public String getCacheName() {
+    return cacheName;
   }
 
   /**
@@ -224,7 +257,8 @@ public class RetryCache {
    */
   private CacheEntry waitForCompletion(CacheEntry newEntry) {
     CacheEntry mapEntry = null;
-    synchronized (this) {
+    lock.lock();
+    try {
       mapEntry = set.get(newEntry);
       // If an entry in the cache does not exist, add a new one
       if (mapEntry == null) {
@@ -234,8 +268,13 @@ public class RetryCache {
               + newEntry.callId + " to retryCache");
         }
         set.put(newEntry);
+        retryCacheMetrics.incrCacheUpdated();
         return newEntry;
+      } else {
+        retryCacheMetrics.incrCacheHit();
       }
+    } finally {
+      lock.unlock();
     }
     // Entry already exists in cache. Wait for completion and return its state
     Preconditions.checkNotNull(mapEntry,
@@ -266,9 +305,13 @@ public class RetryCache {
   public void addCacheEntry(byte[] clientId, int callId) {
     CacheEntry newEntry = new CacheEntry(clientId, callId, System.nanoTime()
         + expirationTime, true);
-    synchronized(this) {
+    lock.lock();
+    try {
       set.put(newEntry);
+    } finally {
+      lock.unlock();
     }
+    retryCacheMetrics.incrCacheUpdated();
   }
   
   public void addCacheEntryWithPayload(byte[] clientId, int callId,
@@ -276,9 +319,13 @@ public class RetryCache {
     // since the entry is loaded from editlog, we can assume it succeeded.    
     CacheEntry newEntry = new CacheEntryWithPayload(clientId, callId, payload,
         System.nanoTime() + expirationTime, true);
-    synchronized(this) {
+    lock.lock();
+    try {
       set.put(newEntry);
+    } finally {
+      lock.unlock();
     }
+    retryCacheMetrics.incrCacheUpdated();
   }
 
   private static CacheEntry newEntry(long expirationTime) {
@@ -330,6 +377,7 @@ public class RetryCache {
   public static void clear(RetryCache cache) {
     if (cache != null) {
       cache.set.clear();
+      cache.incrCacheClearedCounter();
     }
   }
 }

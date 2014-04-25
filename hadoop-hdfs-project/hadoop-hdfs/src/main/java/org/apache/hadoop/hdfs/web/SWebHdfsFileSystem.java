@@ -37,12 +37,11 @@ public class SWebHdfsFileSystem extends WebHdfsFileSystem {
 
   @Override
   protected synchronized void initializeTokenAspect() {
-    tokenAspect = new TokenAspect<WebHdfsFileSystem>(this, TOKEN_KIND);
+    tokenAspect = new TokenAspect<SWebHdfsFileSystem>(this, tokenServiceName, TOKEN_KIND);
   }
 
   @Override
   protected int getDefaultPort() {
-    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY,
-        DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT);
+    return DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT;
   }
 }

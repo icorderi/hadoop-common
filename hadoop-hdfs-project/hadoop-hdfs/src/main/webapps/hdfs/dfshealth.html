@@ -1,3 +1,5 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <!--
    Licensed to the Apache Software Foundation (ASF) under one or more
    contributor license agreements.  See the NOTICE file distributed with
@@ -14,8 +16,6 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 -->
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
-    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
 <link rel="stylesheet" type="text/css" href="/static/bootstrap-3.0.2/css/bootstrap.min.css" />
@@ -27,7 +27,7 @@
 <header class="navbar navbar-inverse bs-docs-nav" role="banner">
 <div class="container">
   <div class="navbar-header">
-    <a href="http://hadoop.apache.org/core" class="navbar-brand">Hadoop</a>
+    <div class="navbar-brand">Hadoop</div>
   </div>
 
   <ul class="nav navbar-nav" id="ui-tabs">
@@ -64,7 +64,7 @@
 
 <div class="row">
   <hr />
-  <div class="col-xs-2"><p><a href="http://hadoop.apache.org/core">Hadoop</a>, 2014.</p></div>
+  <div class="col-xs-2"><p>Hadoop, 2014.</p></div>
   <div class="col-xs-1 pull-right"><a style="color: #ddd" href="dfshealth.jsp">Legacy UI</a></div>
 </div>
 </div>
@@ -72,14 +72,26 @@
 <script type="text/x-dust-template" id="tmpl-dfshealth">
 
 {#nn}
-{@if cond="{DistinctVersionCount} > 1"}
+{@if cond="{DistinctVersionCount} > 1 || '{RollingUpgradeStatus}'.length"}
 <div class="alert alert-dismissable alert-info">
   <button type="button" class="close" data-dismiss="alert" aria-hidden="true">&times;</button>
 
-  There are {DistinctVersionCount} versions of datanodes currently live: 
-  {#DistinctVersions}
-  {key} ({value}) {@sep},{/sep}
-  {/DistinctVersions}
+  {#RollingUpgradeStatus}
+    <p>Rolling upgrade started at {#helper_date_tostring value="{startTime}"/}. </br>
+    {#createdRollbackImages}
+      Rollback image has been created. Proceed to upgrade daemons.
+      {:else}
+      Rollback image has not been created.
+    {/createdRollbackImages}
+    </p>
+  {/RollingUpgradeStatus}
+
+  {@if cond="{DistinctVersionCount} > 1"}
+    There are {DistinctVersionCount} versions of datanodes currently live:
+    {#DistinctVersions}
+    {key} ({value}) {@sep},{/sep}
+    {/DistinctVersions}
+  {/if}
 </div>
 {/if}
 
@@ -148,10 +160,11 @@
   <tr><th><a href="#tab-datanode">Dead Nodes</a></th><td>{NumDeadDataNodes} (Decommissioned: {NumDecomDeadDataNodes})</td></tr>
   <tr><th><a href="#tab-datanode">Decommissioning Nodes</a></th><td>{NumDecommissioningDataNodes}</td></tr>
   <tr><th title="Excludes missing blocks.">Number of Under-Replicated Blocks</th><td>{UnderReplicatedBlocks}</td></tr>
+  <tr><th>Number of Blocks Pending Deletion</th><td>{PendingDeletionBlocks}</td></tr>
 {/fs}
 </table>
 
-<div class="page-header"><h1>Namenode Journal Status</h1></div>
+<div class="page-header"><h1>NameNode Journal Status</h1></div>
 <p><b>Current transaction ID:</b> {nn.JournalTransactionInfo.LastAppliedOrWrittenTxId}</p>
 <table class="table" title="NameNode Journals">
   <thead>
@@ -176,8 +189,54 @@
 
 <script type="text/x-dust-template" id="tmpl-snapshot">
 <div class="page-header"><h1>Snapshot Summary</h1></div>
-<p><b>Snapshottable directories</b>: {SnapshottableDirectories}</p>
-<p><b>Snapshotted directories</b>: {Snapshots}</p>
+<div class="page-header"><h1><small>Snapshottable directories: {@size key=SnapshottableDirectories}{/size}</small></div>
+<small>
+<table class="table">
+  <thead>
+    <tr>
+      <th>Path</th>
+      <th>Snapshot Number</th>
+      <th>Snapshot Quota</th>
+      <th>Modification Time</th>
+      <th>Permission</th>
+      <th>Owner</th>
+      <th>Group</th>
+    </tr>
+  </thead>
+  {#SnapshottableDirectories}
+  <tr>
+    <td>{path}</td>
+    <td>{snapshotNumber}</td>
+    <td>{snapshotQuota}</td>
+    <td>{modificationTime|date_tostring}</td>
+    <td>{permission|helper_to_permission}</td>
+    <td>{owner}</td>
+    <td>{group}</td>
+  </tr>
+  {/SnapshottableDirectories}
+</table>
+</small>
+
+<div class="page-header"><h1><small>Snapshotted directories: {@size key=Snapshots}{/size}</small></div>
+
+<small>
+<table class="table">
+  <thead>
+    <tr>
+      <th>Snapshot ID</th>
+      <th>Snapshot Directory</th>
+      <th>Modification Time</th>
+    </tr>
+  </thead>
+  {#Snapshots}
+  <tr>
+    <td>{snapshotID}</td>
+    <td>{snapshotDirectory}</td>
+    <td>{modificationTime|date_tostring}</td>
+  </tr>
+  {/Snapshots}
+</table>
+</small>
 </script>
 
 <script type="text/x-dust-template" id="tmpl-datanode">
@@ -292,7 +351,7 @@
 </script><script type="text/javascript" src="/static/bootstrap-3.0.2/js/bootstrap.min.js">
 </script><script type="text/javascript" src="/static/dust-full-2.0.0.min.js">
 </script><script type="text/javascript" src="/static/dust-helpers-1.1.1.min.js">
-</script><script type="text/javascript" src="dfs-dust.js">
+</script><script type="text/javascript" src="/static/dfs-dust.js">
 </script><script type="text/javascript" src="dfshealth.js">
 </script>
 </body>

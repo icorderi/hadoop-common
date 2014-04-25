@@ -63,7 +63,7 @@ import static org.junit.Assert.*;
  */
 public class TestDFSShell {
   private static final Log LOG = LogFactory.getLog(TestDFSShell.class);
-  private static AtomicInteger counter = new AtomicInteger();
+  private static final AtomicInteger counter = new AtomicInteger();
   private final int SUCCESS = 0;
   private final int ERROR = 1;
 
@@ -184,10 +184,7 @@ public class TestDFSShell {
   public void testDu() throws IOException {
     Configuration conf = new HdfsConfiguration();
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
-    FileSystem fs = cluster.getFileSystem();
-    assertTrue("Not a HDFS: "+fs.getUri(),
-                fs instanceof DistributedFileSystem);
-    final DistributedFileSystem dfs = (DistributedFileSystem)fs;
+    DistributedFileSystem fs = cluster.getFileSystem();
     PrintStream psBackup = System.out;
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     PrintStream psOut = new PrintStream(out);
@@ -224,7 +221,6 @@ public class TestDFSShell {
       assertTrue(returnString.contains("23"));
       
     } finally {
-      try {dfs.close();} catch (Exception e) {}
       System.setOut(psBackup);
       cluster.shutdown();
     }
@@ -661,8 +657,7 @@ public class TestDFSShell {
 
       // Test a simple codec. Extension based detection. We use
       // Bzip2 cause its non-native.
-      CompressionCodec codec = (CompressionCodec)
-          ReflectionUtils.newInstance(BZip2Codec.class, conf);
+      CompressionCodec codec = ReflectionUtils.newInstance(BZip2Codec.class, conf);
       String extension = codec.getDefaultExtension();
       Path p = new Path(root, "file." + extension);
       OutputStream fout = new DataOutputStream(codec.createOutputStream(
@@ -805,7 +800,7 @@ public class TestDFSShell {
   public void testCount() throws Exception {
     Configuration conf = new HdfsConfiguration();
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
-    DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+    DistributedFileSystem dfs = cluster.getFileSystem();
     FsShell shell = new FsShell();
     shell.setConf(conf);
 
@@ -1479,10 +1474,11 @@ public class TestDFSShell {
 
     TestGetRunner runner = new TestGetRunner() {
     	private int count = 0;
-    	private FsShell shell = new FsShell(conf);
+    	private final FsShell shell = new FsShell(conf);
 
     	public String run(int exitcode, String... options) throws IOException {
-    	  String dst = TEST_ROOT_DIR + "/" + fname+ ++count;
+    	  String dst = new File(TEST_ROOT_DIR, fname + ++count)
+            .getAbsolutePath();
     	  String[] args = new String[options.length + 3];
     	  args[0] = "-get"; 
     	  args[args.length - 2] = remotef.toString();
@@ -1508,7 +1504,7 @@ public class TestDFSShell {
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).format(true)
         .build();
-      dfs = (DistributedFileSystem)cluster.getFileSystem();
+      dfs = cluster.getFileSystem();
 
       mkdir(dfs, root);
       dfs.copyFromLocalFile(false, false, new Path(localf.getPath()), remotef);
@@ -1537,7 +1533,7 @@ public class TestDFSShell {
       // Start the cluster again, but do not reformat, so prior files remain.
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).format(false)
         .build();
-      dfs = (DistributedFileSystem)cluster.getFileSystem();
+      dfs = cluster.getFileSystem();
 
       assertEquals(null, runner.run(1));
       String corruptedcontent = runner.run(0, "-ignoreCrc");
@@ -1561,7 +1557,7 @@ public class TestDFSShell {
   public void testLsr() throws Exception {
     final Configuration conf = new HdfsConfiguration();
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
-    DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+    DistributedFileSystem dfs = cluster.getFileSystem();
 
     try {
       final String root = createTree(dfs, "lsr");

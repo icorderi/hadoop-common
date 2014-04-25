@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.qjournal.server;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +28,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
+import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
 import org.apache.hadoop.hdfs.server.namenode.FileJournalManager;
@@ -62,15 +65,15 @@ class JNStorage extends Storage {
    * @param errorReporter a callback to report errors
    * @throws IOException 
    */
-  protected JNStorage(Configuration conf, File logDir,
+  protected JNStorage(Configuration conf, File logDir, StartupOption startOpt,
       StorageErrorReporter errorReporter) throws IOException {
     super(NodeType.JOURNAL_NODE);
     
     sd = new StorageDirectory(logDir);
     this.addStorageDir(sd);
     this.fjm = new FileJournalManager(conf, sd, errorReporter);
-    
-    analyzeStorage();
+
+    analyzeAndRecoverStorage(startOpt);
   }
   
   FileJournalManager getJournalManager() {
@@ -162,7 +165,7 @@ class JNStorage extends Storage {
         if (matcher.matches()) {
           // This parsing will always succeed since the group(1) is
           // /\d+/ in the regex itself.
-          long txid = Long.valueOf(matcher.group(1));
+          long txid = Long.parseLong(matcher.group(1));
           if (txid < minTxIdToKeep) {
             LOG.info("Purging no-longer needed file " + txid);
             if (!f.delete()) {
@@ -200,6 +203,28 @@ class JNStorage extends Storage {
     this.state = sd.analyzeStorage(StartupOption.REGULAR, this);
     if (state == StorageState.NORMAL) {
       readProperties(sd);
+    }
+  }
+
+  @Override
+  protected void setLayoutVersion(Properties props, StorageDirectory sd)
+      throws IncorrectVersionException, InconsistentFSStateException {
+    int lv = Integer.parseInt(getProperty(props, sd, "layoutVersion"));
+    // For journal node, since it now does not decode but just scan through the
+    // edits, it can handle edits with future version in most of the cases.
+    // Thus currently we may skip the layoutVersion check here.
+    layoutVersion = lv;
+  }
+
+  void analyzeAndRecoverStorage(StartupOption startOpt) throws IOException {
+    this.state = sd.analyzeStorage(startOpt, this);
+    final boolean needRecover = state != StorageState.NORMAL
+        && state != StorageState.NON_EXISTENT
+        && state != StorageState.NOT_FORMATTED;
+    if (state == StorageState.NORMAL && startOpt != StartupOption.ROLLBACK) {
+      readProperties(sd);
+    } else if (needRecover) {
+      sd.doRecover(state);
     }
   }
 

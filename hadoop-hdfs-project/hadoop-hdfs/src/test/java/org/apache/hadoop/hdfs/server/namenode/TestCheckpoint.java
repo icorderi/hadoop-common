@@ -31,6 +31,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -61,6 +62,7 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
@@ -118,7 +120,7 @@ public class TestCheckpoint {
   static final int numDatanodes = 3;
   short replication = 3;
 
-  static FilenameFilter tmpEditsFilter = new FilenameFilter() {
+  static final FilenameFilter tmpEditsFilter = new FilenameFilter() {
     @Override
     public boolean accept(File dir, String name) {
       return name.startsWith(NameNodeFile.EDITS_TMP.getName());
@@ -553,23 +555,9 @@ public class TestCheckpoint {
   }
 
   /**
-   * Simulate a secondary node failure to transfer image
-   * back to the name-node.
-   * Used to truncate primary fsimage file.
-   */
-  @Test
-  public void testSecondaryFailsToReturnImage() throws IOException {
-    Mockito.doThrow(new IOException("If this exception is not caught by the " +
-        "name-node, fs image will be truncated."))
-        .when(faultInjector).aboutToSendFile(filePathContaining("secondary"));
-
-    doSecondaryFailsToReturnImage();
-  }
-  
-  /**
-   * Similar to above test, but uses an unchecked Error, and causes it
-   * before even setting the length header. This used to cause image
-   * truncation. Regression test for HDFS-3330.
+   * Simulate a secondary node failure to transfer image. Uses an unchecked
+   * error and fail transfer before even setting the length header. This used to
+   * cause image truncation. Regression test for HDFS-3330.
    */
   @Test
   public void testSecondaryFailsWithErrorBeforeSettingHeaders()
@@ -634,11 +622,11 @@ public class TestCheckpoint {
   }
 
   private File filePathContaining(final String substring) {
-    return Mockito.<File>argThat(
+    return Mockito.argThat(
         new ArgumentMatcher<File>() {
           @Override
           public boolean matches(Object argument) {
-            String path = ((File)argument).getAbsolutePath();
+            String path = ((File) argument).getAbsolutePath();
             return path.contains(substring);
           }
         });
@@ -1453,7 +1441,7 @@ public class TestCheckpoint {
       
       for (StorageDirectory sd :
         image.getStorage().dirIterable(NameNodeDirType.IMAGE)) {
-        File imageFile = NNStorage.getImageFile(sd,
+        File imageFile = NNStorage.getImageFile(sd, NameNodeFile.IMAGE,
             expectedTxIdToDownload + 5);
         assertTrue("Image size increased",
             imageFile.length() > fsimageLength);
@@ -1909,7 +1897,12 @@ public class TestCheckpoint {
           .format(true).build();
       int origPort = cluster.getNameNodePort();
       int origHttpPort = cluster.getNameNode().getHttpAddress().getPort();
-      secondary = startSecondaryNameNode(conf);
+      Configuration snnConf = new Configuration(conf);
+      File checkpointDir = new File(MiniDFSCluster.getBaseDirectory(),
+        "namesecondary");
+      snnConf.set(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_DIR_KEY,
+        checkpointDir.getAbsolutePath());
+      secondary = startSecondaryNameNode(snnConf);
 
       // secondary checkpoints once
       secondary.doCheckpoint();
@@ -1974,8 +1967,15 @@ public class TestCheckpoint {
       Mockito.doReturn(Lists.newArrayList(new File("/wont-be-written")))
         .when(dstImage).getFiles(
             Mockito.<NameNodeDirType>anyObject(), Mockito.anyString());
-      
-      Mockito.doReturn(new StorageInfo(1, 1, "X", 1).toColonSeparatedString())
+
+      File mockImageFile = File.createTempFile("image", "");
+      FileOutputStream imageFile = new FileOutputStream(mockImageFile);
+      imageFile.write("data".getBytes());
+      imageFile.close();
+      Mockito.doReturn(mockImageFile).when(dstImage)
+          .findImageFile(Mockito.any(NameNodeFile.class), Mockito.anyLong());
+
+      Mockito.doReturn(new StorageInfo(1, 1, "X", 1, NodeType.NAME_NODE).toColonSeparatedString())
         .when(dstImage).toColonSeparatedString();
 
       try {
@@ -1995,7 +1995,8 @@ public class TestCheckpoint {
       }
 
       try {
-        TransferFsImage.uploadImageFromStorage(fsName, new URL("http://localhost:1234"), dstImage, 0);
+        TransferFsImage.uploadImageFromStorage(fsName, conf, dstImage,
+            NameNodeFile.IMAGE, 0);
         fail("Storage info was not verified");
       } catch (IOException ioe) {
         String msg = StringUtils.stringifyException(ioe);
@@ -2440,8 +2441,8 @@ public class TestCheckpoint {
   
   private static List<File> getCheckpointCurrentDirs(SecondaryNameNode secondary) {
     List<File> ret = Lists.newArrayList();
-    for (URI u : secondary.getCheckpointDirs()) {
-      File checkpointDir = new File(u.getPath());
+    for (String u : secondary.getCheckpointDirectories()) {
+      File checkpointDir = new File(URI.create(u).getPath());
       ret.add(new File(checkpointDir, "current"));
     }
     return ret;

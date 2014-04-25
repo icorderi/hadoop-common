@@ -65,9 +65,10 @@ public abstract class EditLogOutputStream implements Closeable {
   /**
    * Create and initialize underlying persistent edits log storage.
    * 
+   * @param layoutVersion The LayoutVersion of the journal
    * @throws IOException
    */
-  abstract public void create() throws IOException;
+  abstract public void create(int layoutVersion) throws IOException;
 
   /**
    * Close the journal.
@@ -126,14 +127,14 @@ public abstract class EditLogOutputStream implements Closeable {
   }
   
   /**
-   * Return total time spent in {@link #flushAndSync()}
+   * Return total time spent in {@link #flushAndSync(boolean)}
    */
   long getTotalSyncTime() {
     return totalTimeSync;
   }
 
   /**
-   * Return number of calls to {@link #flushAndSync()}
+   * Return number of calls to {@link #flushAndSync(boolean)}
    */
   protected long getNumSync() {
     return numSync;

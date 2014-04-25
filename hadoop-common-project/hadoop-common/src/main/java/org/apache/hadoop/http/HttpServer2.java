@@ -67,12 +67,14 @@ import org.mortbay.jetty.Handler;
 import org.mortbay.jetty.MimeTypes;
 import org.mortbay.jetty.RequestLog;
 import org.mortbay.jetty.Server;
+import org.mortbay.jetty.SessionManager;
 import org.mortbay.jetty.handler.ContextHandler;
 import org.mortbay.jetty.handler.ContextHandlerCollection;
 import org.mortbay.jetty.handler.HandlerCollection;
 import org.mortbay.jetty.handler.RequestLogHandler;
 import org.mortbay.jetty.nio.SelectChannelConnector;
 import org.mortbay.jetty.security.SslSocketConnector;
+import org.mortbay.jetty.servlet.AbstractSessionManager;
 import org.mortbay.jetty.servlet.Context;
 import org.mortbay.jetty.servlet.DefaultServlet;
 import org.mortbay.jetty.servlet.FilterHolder;
@@ -356,6 +358,13 @@ public final class HttpServer2 implements FilterContainer {
     threadPool.setDaemon(true);
     webServer.setThreadPool(threadPool);
 
+    SessionManager sm = webAppContext.getSessionHandler().getSessionManager();
+    if (sm instanceof AbstractSessionManager) {
+      AbstractSessionManager asm = (AbstractSessionManager)sm;
+      asm.setHttpOnly(true);
+      asm.setSecureCookies(true);
+    }
+
     ContextHandlerCollection contexts = new ContextHandlerCollection();
     RequestLog requestLog = HttpRequestLog.getRequestLog(name);
 
@@ -363,7 +372,7 @@ public final class HttpServer2 implements FilterContainer {
       RequestLogHandler requestLogHandler = new RequestLogHandler();
       requestLogHandler.setRequestLog(requestLog);
       HandlerCollection handlers = new HandlerCollection();
-      handlers.setHandlers(new Handler[] { requestLogHandler, contexts });
+      handlers.setHandlers(new Handler[] {contexts, requestLogHandler});
       webServer.setHandler(handlers);
     } else {
       webServer.setHandler(contexts);
@@ -425,7 +434,7 @@ public final class HttpServer2 implements FilterContainer {
    * provided. This wrapper and all subclasses must create at least one
    * listener.
    */
-  public Connector createBaseListener(Configuration conf) throws IOException {
+  public Connector createBaseListener(Configuration conf) {
     return HttpServer2.createDefaultChannelConnector();
   }
 
@@ -518,8 +527,7 @@ public final class HttpServer2 implements FilterContainer {
     addServlet("conf", "/conf", ConfServlet.class);
   }
 
-  public void addContext(Context ctxt, boolean isFiltered)
-      throws IOException {
+  public void addContext(Context ctxt, boolean isFiltered) {
     webServer.addHandler(ctxt);
     addNoCacheFilter(webAppContext);
     defaultContexts.put(ctxt, isFiltered);

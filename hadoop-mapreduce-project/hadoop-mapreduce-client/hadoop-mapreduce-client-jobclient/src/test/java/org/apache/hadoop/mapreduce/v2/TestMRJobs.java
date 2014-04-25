@@ -23,11 +23,11 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
-import java.io.InputStreamReader;
 import java.io.IOException;
 import java.io.StringReader;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
@@ -41,6 +41,7 @@ import org.apache.hadoop.FailingMapper;
 import org.apache.hadoop.RandomTextWriterJob;
 import org.apache.hadoop.RandomTextWriterJob.RandomInputFormat;
 import org.apache.hadoop.SleepJob;
+import org.apache.hadoop.SleepJob.SleepMapper;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -82,8 +83,10 @@ import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.JarFinder;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.log4j.Level;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -96,6 +99,7 @@ public class TestMRJobs {
   private static final EnumSet<RMAppState> TERMINAL_RM_APP_STATES =
       EnumSet.of(RMAppState.FINISHED, RMAppState.FAILED, RMAppState.KILLED);
   private static final int NUM_NODE_MGRS = 3;
+  private static final String TEST_IO_SORT_MB = "11";
 
   protected static MiniMRYarnCluster mrCluster;
   protected static MiniDFSCluster dfsCluster;
@@ -201,6 +205,38 @@ public class TestMRJobs {
     
     // TODO later:  add explicit "isUber()" checks of some sort (extend
     // JobStatus?)--compare against MRJobConfig.JOB_UBERTASK_ENABLE value
+  }
+
+  @Test(timeout = 300000)
+  public void testJobClassloader() throws IOException, InterruptedException,
+      ClassNotFoundException {
+    LOG.info("\n\n\nStarting testJobClassloader().");
+
+    if (!(new File(MiniMRYarnCluster.APPJAR)).exists()) {
+      LOG.info("MRAppJar " + MiniMRYarnCluster.APPJAR
+               + " not found. Not running test.");
+      return;
+    }
+    final Configuration sleepConf = new Configuration(mrCluster.getConfig());
+    // set master address to local to test that local mode applied iff framework == local
+    sleepConf.set(MRConfig.MASTER_ADDRESS, "local");
+    sleepConf.setBoolean(MRJobConfig.MAPREDUCE_JOB_CLASSLOADER, true);
+    sleepConf.set(MRJobConfig.IO_SORT_MB, TEST_IO_SORT_MB);
+    sleepConf.set(MRJobConfig.MR_AM_LOG_LEVEL, Level.ALL.toString());
+    sleepConf.set(MRJobConfig.MAP_LOG_LEVEL, Level.ALL.toString());
+    sleepConf.set(MRJobConfig.REDUCE_LOG_LEVEL, Level.ALL.toString());
+    sleepConf.set(MRJobConfig.MAP_JAVA_OPTS, "-verbose:class");
+    final SleepJob sleepJob = new SleepJob();
+    sleepJob.setConf(sleepConf);
+    final Job job = sleepJob.createJob(1, 1, 10, 1, 10, 1);
+    job.setMapperClass(ConfVerificationMapper.class);
+    job.addFileToClassPath(APP_JAR); // The AppMaster jar itself.
+    job.setJarByClass(SleepJob.class);
+    job.setMaxMapAttempts(1); // speed up failures
+    job.submit();
+    boolean succeeded = job.waitForCompletion(true);
+    Assert.assertTrue("Job status: " + job.getStatus().getFailureInfo(),
+        succeeded);
   }
 
   protected void verifySleepJobCounters(Job job) throws InterruptedException,
@@ -441,9 +477,12 @@ public class TestMRJobs {
     final SleepJob sleepJob = new SleepJob();
     final JobConf sleepConf = new JobConf(mrCluster.getConfig());
     sleepConf.set(MRJobConfig.MAP_LOG_LEVEL, Level.ALL.toString());
-    sleepConf.set(MRJobConfig.MR_AM_LOG_LEVEL, Level.ALL.toString());
-    sleepConf.setLong(MRJobConfig.TASK_USERLOG_LIMIT, 1);
+    final long userLogKb = 4;
+    sleepConf.setLong(MRJobConfig.TASK_USERLOG_LIMIT, userLogKb);
     sleepConf.setInt(MRJobConfig.TASK_LOG_BACKUPS, 3);
+    sleepConf.set(MRJobConfig.MR_AM_LOG_LEVEL, Level.ALL.toString());
+    final long amLogKb = 7;
+    sleepConf.setLong(MRJobConfig.MR_AM_LOG_KB, amLogKb);
     sleepConf.setInt(MRJobConfig.MR_AM_LOG_BACKUPS, 7);
     sleepJob.setConf(sleepConf);
 
@@ -492,27 +531,18 @@ public class TestMRJobs {
         LOG.info("Checking for glob: " + absSyslogGlob);
         final FileStatus[] syslogs = localFs.globStatus(absSyslogGlob);
         for (FileStatus slog : syslogs) {
-          // check all syslogs for the container
-          //
-          final FileStatus[] sysSiblings = localFs.globStatus(new Path(
-              slog.getPath().getParent(), TaskLog.LogName.SYSLOG + "*"));
-          boolean foundAppMaster = false;
-          floop:
-          for (FileStatus f : sysSiblings) {
-            final BufferedReader reader = new BufferedReader(
-                new InputStreamReader(localFs.open(f.getPath())));
-            String line;
-            try {
-              while ((line = reader.readLine()) != null) {
-                if (line.contains(MRJobConfig.APPLICATION_MASTER_CLASS)) {
-                  foundAppMaster = true;
-                  break floop;
-                }
-              }
-            } finally {
-              reader.close();
-            }
+          boolean foundAppMaster = job.isUber();
+          final Path containerPathComponent = slog.getPath().getParent();
+          if (!foundAppMaster) {
+            final ContainerId cid = ConverterUtils.toContainerId(
+                containerPathComponent.getName());
+            foundAppMaster = (cid.getId() == 1);
           }
+
+          final FileStatus[] sysSiblings = localFs.globStatus(new Path(
+              containerPathComponent, TaskLog.LogName.SYSLOG + "*"));
+          // sort to ensure for i > 0 sysSiblings[i] == "syslog.i"
+          Arrays.sort(sysSiblings);
 
           if (foundAppMaster) {
             numAppMasters++;
@@ -520,11 +550,19 @@ public class TestMRJobs {
             numMapTasks++;
           }
 
-          Assert.assertSame("Number of sylog* files",
-              foundAppMaster
-                ? sleepConf.getInt(MRJobConfig.MR_AM_LOG_BACKUPS, 0) + 1
-                : sleepConf.getInt(MRJobConfig.TASK_LOG_BACKUPS, 0) + 1,
-              sysSiblings.length);
+          if (foundAppMaster) {
+            Assert.assertSame("Unexpected number of AM sylog* files",
+                sleepConf.getInt(MRJobConfig.MR_AM_LOG_BACKUPS, 0) + 1,
+                sysSiblings.length);
+            Assert.assertTrue("AM syslog.1 length kb should be >= " + amLogKb,
+                sysSiblings[1].getLen() >= amLogKb * 1024);
+          } else {
+            Assert.assertSame("Unexpected number of MR task sylog* files",
+                sleepConf.getInt(MRJobConfig.TASK_LOG_BACKUPS, 0) + 1,
+                sysSiblings.length);
+            Assert.assertTrue("MR syslog.1 length kb should be >= " + userLogKb,
+                sysSiblings[1].getLen() >= userLogKb * 1024);
+          }
         }
       }
     }
@@ -790,5 +828,19 @@ public class TestMRJobs {
     in.close();
     jos.closeEntry();
     jarFile.delete();
+  }
+
+  public static class ConfVerificationMapper extends SleepMapper {
+    @Override
+    protected void setup(Context context)
+        throws IOException, InterruptedException {
+      super.setup(context);
+      final Configuration conf = context.getConfiguration();
+      final String ioSortMb = conf.get(MRJobConfig.IO_SORT_MB);
+      if (!TEST_IO_SORT_MB.equals(ioSortMb)) {
+        throw new IOException("io.sort.mb expected: " + TEST_IO_SORT_MB
+            + ", actual: "  + ioSortMb);
+      }
+    }
   }
 }

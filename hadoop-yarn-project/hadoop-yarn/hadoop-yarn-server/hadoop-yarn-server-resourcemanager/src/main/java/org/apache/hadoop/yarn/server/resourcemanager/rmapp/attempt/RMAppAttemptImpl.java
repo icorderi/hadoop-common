@@ -35,15 +35,18 @@ import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 
 import javax.crypto.SecretKey;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
@@ -78,6 +81,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppFailedAttemptEve
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppFinishedAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptContainerAcquiredEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptContainerAllocatedEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptContainerFinishedEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptLaunchFailedEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptNewSavedEvent;
@@ -157,6 +161,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private RMAppAttemptEvent eventCausingFinalSaving;
   private RMAppAttemptState targetedFinalState;
   private RMAppAttemptState recoveredFinalState;
+  private RMAppAttemptState stateBeforeFinalSaving;
   private Object transitionTodo;
 
   private static final StateMachineFactory<RMAppAttemptImpl,
@@ -201,7 +206,8 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
           
        // Transitions from SCHEDULED State
       .addTransition(RMAppAttemptState.SCHEDULED,
-                     RMAppAttemptState.ALLOCATED_SAVING,
+          EnumSet.of(RMAppAttemptState.ALLOCATED_SAVING,
+            RMAppAttemptState.SCHEDULED),
           RMAppAttemptEventType.CONTAINER_ALLOCATED,
           new AMContainerAllocatedTransition())
       .addTransition(RMAppAttemptState.SCHEDULED, RMAppAttemptState.FINAL_SAVING,
@@ -502,10 +508,11 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       final String trackingUriWithoutScheme) {
     this.readLock.lock();
     try {
+      final String scheme = WebAppUtils.getHttpSchemePrefix(conf);
       URI trackingUri = StringUtils.isEmpty(trackingUriWithoutScheme) ? null :
-        ProxyUriUtils.getUriFromAMUrl(trackingUriWithoutScheme);
+        ProxyUriUtils.getUriFromAMUrl(scheme, trackingUriWithoutScheme);
       String proxy = WebAppUtils.getProxyHostAndPort(conf);
-      URI proxyUri = ProxyUriUtils.getUriFromAMUrl(proxy);
+      URI proxyUri = ProxyUriUtils.getUriFromAMUrl(scheme, proxy);
       URI result = ProxyUriUtils.getProxyUri(trackingUri, proxyUri,
           applicationAttemptId.getApplicationId());
       return result.toASCIIString();
@@ -624,7 +631,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
-  private void setMasterContainer(Container container) {
+  @InterfaceAudience.Private
+  @VisibleForTesting
+  public void setMasterContainer(Container container) {
     masterContainer = container;
   }
 
@@ -767,8 +776,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
 
   private static final List<ContainerId> EMPTY_CONTAINER_RELEASE_LIST =
       new ArrayList<ContainerId>();
+
   private static final List<ResourceRequest> EMPTY_CONTAINER_REQUEST_LIST =
-    new ArrayList<ResourceRequest>();
+      new ArrayList<ResourceRequest>();
 
   private static final class ScheduleTransition
       implements
@@ -801,29 +811,66 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
-  private static final class AMContainerAllocatedTransition 
-                                                      extends BaseTransition {
+  private static final class AMContainerAllocatedTransition
+      implements
+      MultipleArcTransition<RMAppAttemptImpl, RMAppAttemptEvent, RMAppAttemptState> {
     @Override
-    public void transition(RMAppAttemptImpl appAttempt,
-                                                     RMAppAttemptEvent event) {
+    public RMAppAttemptState transition(RMAppAttemptImpl appAttempt,
+        RMAppAttemptEvent event) {
       // Acquire the AM container from the scheduler.
-      Allocation amContainerAllocation = appAttempt.scheduler.allocate(
-          appAttempt.applicationAttemptId, EMPTY_CONTAINER_REQUEST_LIST,
-          EMPTY_CONTAINER_RELEASE_LIST, null, null);
+      Allocation amContainerAllocation =
+          appAttempt.scheduler.allocate(appAttempt.applicationAttemptId,
+            EMPTY_CONTAINER_REQUEST_LIST, EMPTY_CONTAINER_RELEASE_LIST, null,
+            null);
       // There must be at least one container allocated, because a
       // CONTAINER_ALLOCATED is emitted after an RMContainer is constructed,
-      // and is put in SchedulerApplication#newlyAllocatedContainers. Then,
-      // YarnScheduler#allocate will fetch it.
-      assert amContainerAllocation.getContainers().size() != 0;
+      // and is put in SchedulerApplication#newlyAllocatedContainers.
+
+      // Note that YarnScheduler#allocate is not guaranteed to be able to
+      // fetch it since container may not be fetchable for some reason like
+      // DNS unavailable causing container token not generated. As such, we
+      // return to the previous state and keep retry until am container is
+      // fetched.
+      if (amContainerAllocation.getContainers().size() == 0) {
+        appAttempt.retryFetchingAMContainer(appAttempt);
+        return RMAppAttemptState.SCHEDULED;
+      }
+
       // Set the masterContainer
-      appAttempt.setMasterContainer(amContainerAllocation.getContainers().get(
-                                                                           0));
+      appAttempt.setMasterContainer(amContainerAllocation.getContainers()
+        .get(0));
+      // The node set in NMTokenSecrentManager is used for marking whether the
+      // NMToken has been issued for this node to the AM.
+      // When AM container was allocated to RM itself, the node which allocates
+      // this AM container was marked as the NMToken already sent. Thus,
+      // clear this node set so that the following allocate requests from AM are
+      // able to retrieve the corresponding NMToken.
+      appAttempt.rmContext.getNMTokenSecretManager()
+        .clearNodeSetForAttempt(appAttempt.applicationAttemptId);
       appAttempt.getSubmissionContext().setResource(
-          appAttempt.getMasterContainer().getResource());
+        appAttempt.getMasterContainer().getResource());
       appAttempt.storeAttempt();
+      return RMAppAttemptState.ALLOCATED_SAVING;
     }
   }
-  
+
+  private void retryFetchingAMContainer(final RMAppAttemptImpl appAttempt) {
+    // start a new thread so that we are not blocking main dispatcher thread.
+    new Thread() {
+      @Override
+      public void run() {
+        try {
+          Thread.sleep(500);
+        } catch (InterruptedException e) {
+          LOG.warn("Interrupted while waiting to resend the"
+              + " ContainerAllocated Event.");
+        }
+        appAttempt.eventHandler.handle(new RMAppAttemptContainerAllocatedEvent(
+          appAttempt.applicationAttemptId));
+      }
+    }.start();
+  }
+
   private static final class AttemptStoredTransition extends BaseTransition {
     @Override
     public void transition(RMAppAttemptImpl appAttempt,
@@ -839,6 +886,11 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     @Override
     public RMAppAttemptState transition(RMAppAttemptImpl appAttempt,
         RMAppAttemptEvent event) {
+      /*
+       * If last attempt recovered final state is null .. it means attempt was
+       * started but AM container may or may not have started / finished.
+       * Therefore we should wait for it to finish.
+       */
       if (appAttempt.recoveredFinalState != null) {
         appAttempt.progress = 1.0f;
         RMApp rmApp =appAttempt.rmContext.getRMApps().get(
@@ -885,6 +937,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       RMAppAttemptState stateToBeStored) {
 
     rememberTargetTransitions(event, transitionToDo, targetFinalState);
+    stateBeforeFinalSaving = getState();
 
     // As of today, finalState, diagnostics, final-tracking-url and
     // finalAppStatus are the only things that we store into the StateStore
@@ -1050,7 +1103,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       appAttempt.removeCredentials(appAttempt);
 
       appAttempt.rmContext.getRMApplicationHistoryWriter()
-          .applicationAttemptFinished(appAttempt);
+          .applicationAttemptFinished(appAttempt, finalAttemptState);
     }
   }
 
@@ -1536,6 +1589,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   @Override
   public YarnApplicationAttemptState createApplicationAttemptState() {
     RMAppAttemptState state = getState();
+    // If AppAttempt is in FINAL_SAVING state, return its previous state.
+    if (state.equals(RMAppAttemptState.FINAL_SAVING)) {
+      state = stateBeforeFinalSaving;
+    }
     return RMServerUtils.createApplicationAttemptState(state);
   }
 
@@ -1560,7 +1617,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       ExitUtil.terminate(1, storeEvent.getStoredException());
     }
   }
-  
+
   private void storeAttempt() {
     // store attempt data in a non-blocking manner to prevent dispatcher
     // thread starvation and wait for state to be saved
@@ -1586,5 +1643,24 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
 
   private static String sanitizeTrackingUrl(String url) {
     return (url == null || url.trim().isEmpty()) ? "N/A" : url;
+  }
+
+  @Override
+  public ApplicationAttemptReport createApplicationAttemptReport() {
+    this.readLock.lock();
+    ApplicationAttemptReport attemptReport = null;
+    try {
+      // AM container maybe not yet allocated. and also unmangedAM doesn't have
+      // am container.
+      ContainerId amId =
+          masterContainer == null ? null : masterContainer.getId();
+      attemptReport = ApplicationAttemptReport.newInstance(this
+          .getAppAttemptId(), this.getHost(), this.getRpcPort(), this
+          .getTrackingUrl(), this.getDiagnostics(), YarnApplicationAttemptState
+          .valueOf(this.getState().toString()), amId);
+    } finally {
+      this.readLock.unlock();
+    }
+    return attemptReport;
   }
 }

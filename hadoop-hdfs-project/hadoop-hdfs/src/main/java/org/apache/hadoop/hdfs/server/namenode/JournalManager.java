@@ -49,7 +49,8 @@ public interface JournalManager extends Closeable, FormatConfirmable,
    * Begin writing to a new segment of the log stream, which starts at
    * the given transaction ID.
    */
-  EditLogOutputStream startLogSegment(long txId) throws IOException;
+  EditLogOutputStream startLogSegment(long txId, int layoutVersion)
+      throws IOException;
 
   /**
    * Mark the log segment that spans from firstTxId to lastTxId
@@ -109,7 +110,15 @@ public interface JournalManager extends Closeable, FormatConfirmable,
    * roll back their state should just return without error.
    */
   void doRollback() throws IOException;
-  
+
+  /**
+   * Discard the segments whose first txid is >= the given txid.
+   * @param startTxId The given txid should be right at the segment boundary, 
+   * i.e., it should be the first txid of some segment, if segment corresponding
+   * to the txid exists.
+   */
+  void discardSegments(long startTxId) throws IOException;
+
   /**
    * @return the CTime of the journal manager.
    */

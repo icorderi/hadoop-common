@@ -18,11 +18,16 @@
 
 package org.apache.hadoop.mapreduce.v2.app.job.impl;
 
-import junit.framework.Assert;
+import java.util.Map;
+
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapreduce.MRConfig;
+import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.MRApp;
@@ -30,7 +35,7 @@ import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerLauncher;
 import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerLauncherEvent;
 import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerRemoteLaunchEvent;
-import org.apache.hadoop.util.Shell;
+import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.junit.Test;
 
@@ -42,15 +47,17 @@ public class TestMapReduceChildJVM {
   public void testCommandLine() throws Exception {
 
     MyMRApp app = new MyMRApp(1, 0, true, this.getClass().getName(), true);
-    Job job = app.submit(new Configuration());
+    Configuration conf = new Configuration();
+    conf.setBoolean(MRConfig.MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM, true);
+    Job job = app.submit(conf);
     app.waitForState(job, JobState.SUCCEEDED);
     app.verifyCompleted();
 
     Assert.assertEquals(
-      "[" + envVar("JAVA_HOME") + "/bin/java" +
+      "[" + MRApps.crossPlatformify("JAVA_HOME") + "/bin/java" +
       " -Djava.net.preferIPv4Stack=true" +
       " -Dhadoop.metrics.log.level=WARN" +
-      "  -Xmx200m -Djava.io.tmpdir=" + envVar("PWD") + "/tmp" +
+      "  -Xmx200m -Djava.io.tmpdir=" + MRApps.crossPlatformify("PWD") + "/tmp" +
       " -Dlog4j.configuration=container-log4j.properties" +
       " -Dyarn.app.container.log.dir=<LOG_DIR>" +
       " -Dyarn.app.container.log.filesize=0" +
@@ -61,11 +68,20 @@ public class TestMapReduceChildJVM {
       " 0" +
       " 1><LOG_DIR>/stdout" +
       " 2><LOG_DIR>/stderr ]", app.myCommandLine);
+    
+    Assert.assertTrue("HADOOP_ROOT_LOGGER not set for job",
+      app.cmdEnvironment.containsKey("HADOOP_ROOT_LOGGER"));
+    Assert.assertEquals("INFO,console",
+      app.cmdEnvironment.get("HADOOP_ROOT_LOGGER"));
+    Assert.assertTrue("HADOOP_CLIENT_OPTS not set for job",
+      app.cmdEnvironment.containsKey("HADOOP_CLIENT_OPTS"));
+    Assert.assertEquals("", app.cmdEnvironment.get("HADOOP_CLIENT_OPTS"));
   }
 
   private static final class MyMRApp extends MRApp {
 
     private String myCommandLine;
+    private Map<String, String> cmdEnvironment;
 
     public MyMRApp(int maps, int reduces, boolean autoComplete,
         String testName, boolean cleanOnStart) {
@@ -84,22 +100,44 @@ public class TestMapReduceChildJVM {
             String cmdString = launchContext.getCommands().toString();
             LOG.info("launchContext " + cmdString);
             myCommandLine = cmdString;
+            cmdEnvironment = launchContext.getEnvironment();
           }
           super.handle(event);
         }
       };
     }
   }
+  
+  @Test
+  public void testEnvironmentVariables() throws Exception {
+    MyMRApp app = new MyMRApp(1, 0, true, this.getClass().getName(), true);
+    Configuration conf = new Configuration();
+    conf.set(JobConf.MAPRED_MAP_TASK_ENV, "HADOOP_CLIENT_OPTS=test");
+    conf.setStrings(MRJobConfig.MAP_LOG_LEVEL, "WARN");
+    conf.setBoolean(MRConfig.MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM, false);
+    Job job = app.submit(conf);
+    app.waitForState(job, JobState.SUCCEEDED);
+    app.verifyCompleted();
+    
+    Assert.assertTrue("HADOOP_ROOT_LOGGER not set for job",
+      app.cmdEnvironment.containsKey("HADOOP_ROOT_LOGGER"));
+    Assert.assertEquals("WARN,console",
+      app.cmdEnvironment.get("HADOOP_ROOT_LOGGER"));
+    Assert.assertTrue("HADOOP_CLIENT_OPTS not set for job",
+      app.cmdEnvironment.containsKey("HADOOP_CLIENT_OPTS"));
+    Assert.assertEquals("test", app.cmdEnvironment.get("HADOOP_CLIENT_OPTS"));
 
-  /**
-   * Returns platform-specific string for retrieving the value of an environment
-   * variable with the given name.  On Unix, this returns $name.  On Windows,
-   * this returns %name%.
-   * 
-   * @param name String environment variable name
-   * @return String for retrieving value of environment variable
-   */
-  private static String envVar(String name) {
-    return Shell.WINDOWS ? '%' + name + '%' : '$' + name;
+    // Try one more.
+    app = new MyMRApp(1, 0, true, this.getClass().getName(), true);
+    conf = new Configuration();
+    conf.set(JobConf.MAPRED_MAP_TASK_ENV, "HADOOP_ROOT_LOGGER=trace");
+    job = app.submit(conf);
+    app.waitForState(job, JobState.SUCCEEDED);
+    app.verifyCompleted();
+    
+    Assert.assertTrue("HADOOP_ROOT_LOGGER not set for job",
+      app.cmdEnvironment.containsKey("HADOOP_ROOT_LOGGER"));
+    Assert.assertEquals("trace",
+      app.cmdEnvironment.get("HADOOP_ROOT_LOGGER"));
   }
 }

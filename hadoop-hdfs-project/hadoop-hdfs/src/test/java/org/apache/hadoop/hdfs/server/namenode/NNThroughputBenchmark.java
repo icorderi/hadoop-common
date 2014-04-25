@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
@@ -162,7 +163,7 @@ public class NNThroughputBenchmark implements Tool {
     protected static final String OP_ALL_NAME = "all";
     protected static final String OP_ALL_USAGE = "-op all <other ops options>";
 
-    protected String baseDir;
+    protected final String baseDir;
     protected short replication;
     protected int  numThreads = 0;        // number of threads
     protected int  numOpsRequired = 0;    // number of operations requested
@@ -201,7 +202,7 @@ public class NNThroughputBenchmark implements Tool {
      * {@link #executeOp(int, int, String)}, which can have different meanings
      * depending on the operation performed.
      * 
-     * @param daemonId
+     * @param daemonId id of the daemon calling this method
      * @return the argument
      */
     abstract String getExecutionArgument(int daemonId);
@@ -321,11 +322,10 @@ public class NNThroughputBenchmark implements Tool {
     /**
      * Parse first 2 arguments, corresponding to the "-op" option.
      * 
-     * @param args
+     * @param args argument list
      * @return true if operation is all, which means that options not related
      * to this operation should be ignored, or false otherwise, meaning
      * that usage should be printed when an unrelated option is encountered.
-     * @throws IOException
      */
     protected boolean verifyOpArgument(List<String> args) {
       if(args.size() < 2 || ! args.get(0).startsWith("-op"))
@@ -380,12 +380,12 @@ public class NNThroughputBenchmark implements Tool {
    * One of the threads that perform stats operations.
    */
   private class StatsDaemon extends Thread {
-    private int daemonId;
+    private final int daemonId;
     private int opsPerThread;
     private String arg1;      // argument passed to executeOp()
     private volatile int  localNumOpsExecuted = 0;
     private volatile long localCumulativeTime = 0;
-    private OperationStatsBase statsOp;
+    private final OperationStatsBase statsOp;
 
     StatsDaemon(int daemonId, int nrOps, OperationStatsBase op) {
       this.daemonId = daemonId;
@@ -890,21 +890,14 @@ public class NNThroughputBenchmark implements Tool {
     NamespaceInfo nsInfo;
     DatanodeRegistration dnRegistration;
     DatanodeStorage storage; //only one storage 
-    ArrayList<Block> blocks;
+    final ArrayList<Block> blocks;
     int nrBlocks; // actual number of blocks
     long[] blockReportList;
-    int dnIdx;
+    final int dnIdx;
 
-    /**
-     * Return a a 6 digit integer port.
-     * This is necessary in order to provide lexocographic ordering.
-     * Host names are all the same, the ordering goes by port numbers.
-     */
     private static int getNodePort(int num) throws IOException {
-      int port = 100000 + num;
-      if (String.valueOf(port).length() > 6) {
-        throw new IOException("Too many data-nodes");
-      }
+      int port = 1 + num;
+      Preconditions.checkState(port < Short.MAX_VALUE);
       return port;
     }
 
@@ -1222,7 +1215,7 @@ public class NNThroughputBenchmark implements Tool {
       "-op replication [-datanodes T] [-nodesToDecommission D] " +
       "[-nodeReplicationLimit C] [-totalBlocks B] [-replication R]";
 
-    private BlockReportStats blockReportObject;
+    private final BlockReportStats blockReportObject;
     private int numDatanodes;
     private int nodesToDecommission;
     private int nodeReplicationLimit;

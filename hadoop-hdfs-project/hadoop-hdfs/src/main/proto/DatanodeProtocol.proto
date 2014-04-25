@@ -29,7 +29,7 @@ option java_package = "org.apache.hadoop.hdfs.protocol.proto";
 option java_outer_classname = "DatanodeProtocolProtos";
 option java_generic_services = true;
 option java_generate_equals_and_hash = true;
-package hadoop.hdfs;
+package hadoop.hdfs.datanode;
 
 import "HAServiceProtocol.proto";
 import "hdfs.proto";
@@ -50,7 +50,7 @@ message DatanodeRegistrationProto {
 message DatanodeStorageProto {
   enum StorageState {
     NORMAL = 0;
-    READ_ONLY = 1;
+    READ_ONLY_SHARED = 1;
   }
 
   required string storageUuid = 1;
@@ -221,6 +221,7 @@ message NNHAStatusHeartbeatProto {
 message HeartbeatResponseProto {
   repeated DatanodeCommandProto cmds = 1; // Returned commands can be null
   required NNHAStatusHeartbeatProto haStatus = 2;
+  optional RollingUpgradeStatusProto rollingUpgradeStatus = 3;
 }
 
 /**
@@ -288,8 +289,9 @@ message ReceivedDeletedBlockInfoProto {
  * List of blocks received and deleted for a storage.
  */
 message StorageReceivedDeletedBlocksProto {
-  required string storageUuid = 1;
+  required string storageUuid = 1 [ deprecated = true ];
   repeated ReceivedDeletedBlockInfoProto blocks = 2;
+  optional DatanodeStorageProto storage = 3;   // supersedes storageUuid.
 }
 
 /**

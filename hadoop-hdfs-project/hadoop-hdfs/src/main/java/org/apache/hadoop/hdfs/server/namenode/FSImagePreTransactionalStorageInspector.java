@@ -68,10 +68,10 @@ class FSImagePreTransactionalStorageInspector extends FSImageStorageInspector {
   private StorageDirectory latestEditsSD = null;
 
   /** Set to determine if all of storageDirectories share the same checkpoint */
-  Set<Long> checkpointTimes = new HashSet<Long>();
+  final Set<Long> checkpointTimes = new HashSet<Long>();
 
-  private List<String> imageDirs = new ArrayList<String>();
-  private List<String> editsDirs = new ArrayList<String>();
+  private final List<String> imageDirs = new ArrayList<String>();
+  private final List<String> editsDirs = new ArrayList<String>();
   
   @Override
   void inspectDirectory(StorageDirectory sd) throws IOException {
@@ -263,7 +263,7 @@ class FSImagePreTransactionalStorageInspector extends FSImageStorageInspector {
       // the image is already current, discard edits
       LOG.debug(
           "Name checkpoint time is newer than edits, not loading edits.");
-      return Collections.<File>emptyList();
+      return Collections.emptyList();
     }
     
     return getEditsInStorageDir(latestEditsSD);

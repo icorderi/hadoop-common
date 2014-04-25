@@ -41,6 +41,7 @@ import javax.ws.rs.core.MediaType;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
@@ -85,6 +86,7 @@ import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
 import org.apache.hadoop.yarn.webapp.NotFoundException;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
@@ -99,18 +101,13 @@ public class RMWebServices {
   private final ResourceManager rm;
   private static RecordFactory recordFactory = RecordFactoryProvider
       .getRecordFactory(null);
-  private final ApplicationACLsManager aclsManager;
-  private final QueueACLsManager queueACLsManager;
-
+  private final Configuration conf;
   private @Context HttpServletResponse response;
 
   @Inject
-  public RMWebServices(final ResourceManager rm,
-      final ApplicationACLsManager aclsManager,
-      final QueueACLsManager queueACLsManager) {
+  public RMWebServices(final ResourceManager rm, Configuration conf) {
     this.rm = rm;
-    this.aclsManager = aclsManager;
-    this.queueACLsManager = queueACLsManager;
+    this.conf = conf;
   }
 
   protected Boolean hasAccess(RMApp app, HttpServletRequest hsr) {
@@ -121,10 +118,11 @@ public class RMWebServices {
       callerUGI = UserGroupInformation.createRemoteUser(remoteUser);
     }
     if (callerUGI != null
-        && !(this.aclsManager.checkAccess(callerUGI,
-            ApplicationAccessType.VIEW_APP, app.getUser(),
-            app.getApplicationId()) || this.queueACLsManager.checkAccess(
-            callerUGI, QueueACL.ADMINISTER_QUEUE, app.getQueue()))) {
+        && !(this.rm.getApplicationACLsManager().checkAccess(callerUGI,
+              ApplicationAccessType.VIEW_APP, app.getUser(),
+              app.getApplicationId()) ||
+            this.rm.getQueueACLsManager().checkAccess(callerUGI,
+              QueueACL.ADMINISTER_QUEUE, app.getQueue()))) {
       return false;
     }
     return true;
@@ -261,12 +259,14 @@ public class RMWebServices {
       @QueryParam("startedTimeEnd") String startedEnd,
       @QueryParam("finishedTimeBegin") String finishBegin,
       @QueryParam("finishedTimeEnd") String finishEnd,
-      @QueryParam("applicationTypes") Set<String> applicationTypes) {
+      @QueryParam("applicationTypes") Set<String> applicationTypes,
+      @QueryParam("applicationTags") Set<String> applicationTags) {
     boolean checkCount = false;
     boolean checkStart = false;
     boolean checkEnd = false;
     boolean checkAppTypes = false;
     boolean checkAppStates = false;
+    boolean checkAppTags = false;
     long countNum = 0;
 
     // set values suitable in case both of begin/end not specified
@@ -327,6 +327,11 @@ public class RMWebServices {
       checkAppTypes = true;
     }
 
+    Set<String> appTags = parseQueries(applicationTags, false);
+    if (!appTags.isEmpty()) {
+      checkAppTags = true;
+    }
+
     // stateQuery is deprecated.
     if (stateQuery != null && !stateQuery.isEmpty()) {
       statesQuery.add(stateQuery);
@@ -352,6 +357,10 @@ public class RMWebServices {
 
     if (checkAppTypes) {
       request.setApplicationTypes(appTypes);
+    }
+
+    if (checkAppTags) {
+      request.setApplicationTags(appTags);
     }
 
     if (checkAppStates) {
@@ -404,7 +413,8 @@ public class RMWebServices {
         }
       }
 
-      AppInfo app = new AppInfo(rmapp, hasAccess(rmapp, hsr));
+      AppInfo app = new AppInfo(rmapp, hasAccess(rmapp, hsr),
+          WebAppUtils.getHttpSchemePrefix(conf));
       allApps.add(app);
     }
     return allApps;
@@ -544,7 +554,7 @@ public class RMWebServices {
     if (app == null) {
       throw new NotFoundException("app with id: " + appId + " not found");
     }
-    return new AppInfo(app, hasAccess(app, hsr));
+    return new AppInfo(app, hasAccess(app, hsr), hsr.getScheme() + "://");
   }
 
   @GET

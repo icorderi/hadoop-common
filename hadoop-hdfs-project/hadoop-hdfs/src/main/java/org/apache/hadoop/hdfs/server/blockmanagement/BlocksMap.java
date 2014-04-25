@@ -20,8 +20,13 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import java.util.Iterator;
 
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.util.GSet;
 import org.apache.hadoop.util.LightWeightGSet;
+import org.apache.hadoop.util.LightWeightGSet.SetIterator;
+
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 
 /**
  * This class maintains the map from a block to its metadata.
@@ -30,7 +35,7 @@ import org.apache.hadoop.util.LightWeightGSet;
  */
 class BlocksMap {
   private static class StorageIterator implements Iterator<DatanodeStorageInfo> {
-    private BlockInfo blockInfo;
+    private final BlockInfo blockInfo;
     private int nextIdx = 0;
       
     StorageIterator(BlockInfo blkInfo) {
@@ -62,7 +67,20 @@ class BlocksMap {
   BlocksMap(int capacity) {
     // Use 2% of total memory to size the GSet capacity
     this.capacity = capacity;
-    this.blocks = new LightWeightGSet<Block, BlockInfo>(capacity);
+    this.blocks = new LightWeightGSet<Block, BlockInfo>(capacity) {
+      @Override
+      public Iterator<BlockInfo> iterator() {
+        SetIterator iterator = new SetIterator();
+        /*
+         * Not tracking any modifications to set. As this set will be used
+         * always under FSNameSystem lock, modifications will not cause any
+         * ConcurrentModificationExceptions. But there is a chance of missing
+         * newly added elements during iteration.
+         */
+        iterator.setTrackModification(false);
+        return iterator;
+      }
+    };
   }
 
 
@@ -119,6 +137,22 @@ class BlocksMap {
    */
   Iterable<DatanodeStorageInfo> getStorages(Block b) {
     return getStorages(blocks.get(b));
+  }
+
+  /**
+   * Searches for the block in the BlocksMap and 
+   * returns {@link Iterable} of the storages the block belongs to
+   * <i>that are of the given {@link DatanodeStorage.State state}</i>.
+   * 
+   * @param state DatanodeStorage state by which to filter the returned Iterable
+   */
+  Iterable<DatanodeStorageInfo> getStorages(Block b, final DatanodeStorage.State state) {
+    return Iterables.filter(getStorages(blocks.get(b)), new Predicate<DatanodeStorageInfo>() {
+      @Override
+      public boolean apply(DatanodeStorageInfo storage) {
+        return storage.getState() == state;
+      }
+    });
   }
 
   /**

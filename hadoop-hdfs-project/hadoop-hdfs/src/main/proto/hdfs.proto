@@ -61,6 +61,15 @@ message DatanodeIDProto {
 }
 
 /**
+ * Datanode local information
+ */
+message DatanodeLocalInfoProto {
+  required string softwareVersion = 1;
+  required string configVersion = 2;
+  required uint64 uptime = 3;
+}
+
+/**
  * DatanodeInfo array
  */
 message DatanodeInfosProto {
@@ -343,6 +352,12 @@ message CheckpointCommandProto {
 
 /**
  * Block information
+ *
+ * Please be wary of adding additional fields here, since INodeFiles
+ * need to fit in PB's default max message size of 64MB.
+ * We restrict the max # of blocks per file
+ * (dfs.namenode.fs-limits.max-blocks-per-file), but it's better
+ * to avoid changing this.
  */
 message BlockProto {
   required uint64 blockId = 1;
@@ -459,4 +474,9 @@ message SnapshotInfoProto {
   // TODO: do we need access time?
 }
 
-
+/**
+ * Rolling upgrade status
+ */
+message RollingUpgradeStatusProto {
+  required string blockPoolId = 1;
+}

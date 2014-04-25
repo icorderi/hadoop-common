@@ -21,8 +21,10 @@ package org.apache.hadoop.yarn.server.applicationhistoryservice;
 import java.io.IOException;
 import java.net.URI;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -42,6 +44,9 @@ import org.junit.Test;
 public class TestFileSystemApplicationHistoryStore extends
     ApplicationHistoryStoreTestUtils {
 
+  private static Log LOG = LogFactory
+    .getLog(TestFileSystemApplicationHistoryStore.class.getName());
+
   private FileSystem fs;
   private Path fsWorkingPath;
 
@@ -50,9 +55,12 @@ public class TestFileSystemApplicationHistoryStore extends
     fs = new RawLocalFileSystem();
     Configuration conf = new Configuration();
     fs.initialize(new URI("/"), conf);
-    fsWorkingPath = new Path("Test");
+    fsWorkingPath =
+        new Path("target",
+          TestFileSystemApplicationHistoryStore.class.getSimpleName());
     fs.delete(fsWorkingPath, true);
-    conf.set(YarnConfiguration.FS_HISTORY_STORE_URI, fsWorkingPath.toString());
+    conf.set(YarnConfiguration.FS_APPLICATION_HISTORY_STORE_URI,
+      fsWorkingPath.toString());
     store = new FileSystemApplicationHistoryStore();
     store.init(conf);
     store.start();
@@ -67,11 +75,18 @@ public class TestFileSystemApplicationHistoryStore extends
 
   @Test
   public void testReadWriteHistoryData() throws IOException {
+    LOG.info("Starting testReadWriteHistoryData");
     testWriteHistoryData(5);
     testReadHistoryData(5);
   }
 
   private void testWriteHistoryData(int num) throws IOException {
+    testWriteHistoryData(num, false, false);
+  }
+  
+  private void testWriteHistoryData(
+      int num, boolean missingContainer, boolean missingApplicationAttempt)
+          throws IOException {
     // write application history data
     for (int i = 1; i <= num; ++i) {
       ApplicationId appId = ApplicationId.newInstance(0, i);
@@ -83,21 +98,31 @@ public class TestFileSystemApplicationHistoryStore extends
             ApplicationAttemptId.newInstance(appId, j);
         writeApplicationAttemptStartData(appAttemptId);
 
+        if (missingApplicationAttempt && j == num) {
+          continue;
+        }
         // write container history data
         for (int k = 1; k <= num; ++k) {
           ContainerId containerId = ContainerId.newInstance(appAttemptId, k);
           writeContainerStartData(containerId);
+          if (missingContainer && k == num) {
+            continue;
+          }
           writeContainerFinishData(containerId);
-
-          writeApplicationAttemptFinishData(appAttemptId);
         }
+        writeApplicationAttemptFinishData(appAttemptId);
       }
-
       writeApplicationFinishData(appId);
     }
   }
 
   private void testReadHistoryData(int num) throws IOException {
+    testReadHistoryData(num, false, false);
+  }
+  
+  private void testReadHistoryData(
+      int num, boolean missingContainer, boolean missingApplicationAttempt)
+          throws IOException {
     // read application history data
     Assert.assertEquals(num, store.getAllApplications().size());
     for (int i = 1; i <= num; ++i) {
@@ -116,8 +141,14 @@ public class TestFileSystemApplicationHistoryStore extends
             store.getApplicationAttempt(appAttemptId);
         Assert.assertNotNull(attemptData);
         Assert.assertEquals(appAttemptId.toString(), attemptData.getHost());
-        Assert.assertEquals(appAttemptId.toString(),
-          attemptData.getDiagnosticsInfo());
+        
+        if (missingApplicationAttempt && j == num) {
+          Assert.assertNull(attemptData.getDiagnosticsInfo());
+          continue;
+        } else {
+          Assert.assertEquals(appAttemptId.toString(),
+              attemptData.getDiagnosticsInfo());
+        }
 
         // read container history data
         Assert.assertEquals(num, store.getContainers(appAttemptId).size());
@@ -127,8 +158,12 @@ public class TestFileSystemApplicationHistoryStore extends
           Assert.assertNotNull(containerData);
           Assert.assertEquals(Priority.newInstance(containerId.getId()),
             containerData.getPriority());
-          Assert.assertEquals(containerId.toString(),
-            containerData.getDiagnosticsInfo());
+          if (missingContainer && k == num) {
+            Assert.assertNull(containerData.getDiagnosticsInfo());
+          } else {
+            Assert.assertEquals(containerId.toString(),
+                containerData.getDiagnosticsInfo());
+          }
         }
         ContainerHistoryData masterContainer =
             store.getAMContainer(appAttemptId);
@@ -141,6 +176,7 @@ public class TestFileSystemApplicationHistoryStore extends
 
   @Test
   public void testWriteAfterApplicationFinish() throws IOException {
+    LOG.info("Starting testWriteAfterApplicationFinish");
     ApplicationId appId = ApplicationId.newInstance(0, 1);
     writeApplicationStartData(appId);
     writeApplicationFinishData(appId);
@@ -177,6 +213,7 @@ public class TestFileSystemApplicationHistoryStore extends
 
   @Test
   public void testMassiveWriteContainerHistoryData() throws IOException {
+    LOG.info("Starting testMassiveWriteContainerHistoryData");
     long mb = 1024 * 1024;
     long usedDiskBefore = fs.getContentSummary(fsWorkingPath).getLength() / mb;
     ApplicationId appId = ApplicationId.newInstance(0, 1);
@@ -193,4 +230,17 @@ public class TestFileSystemApplicationHistoryStore extends
     Assert.assertTrue((usedDiskAfter - usedDiskBefore) < 20);
   }
 
+  @Test
+  public void testMissingContainerHistoryData() throws IOException {
+    LOG.info("Starting testMissingContainerHistoryData");
+    testWriteHistoryData(3, true, false);
+    testReadHistoryData(3, true, false);
+  }
+  
+  @Test
+  public void testMissingApplicationAttemptHistoryData() throws IOException {
+    LOG.info("Starting testMissingApplicationAttemptHistoryData");
+    testWriteHistoryData(3, false, true);
+    testReadHistoryData(3, false, true);
+  }
 }

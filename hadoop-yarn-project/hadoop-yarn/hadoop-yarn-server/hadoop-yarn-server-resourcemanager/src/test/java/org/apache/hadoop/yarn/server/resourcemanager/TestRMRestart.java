@@ -23,6 +23,8 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
@@ -38,7 +40,9 @@ import java.util.Set;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.SecurityUtil;
@@ -90,12 +94,16 @@ import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 public class TestRMRestart {
 
+  private final static File TEMP_DIR = new File(System.getProperty(
+    "test.build.data", "/tmp"), "decommision");
+  private File hostFile = new File(TEMP_DIR + File.separator + "hostFile.txt");
   private YarnConfiguration conf;
 
   // Fake rmAddr for token-renewal
@@ -111,6 +119,11 @@ public class TestRMRestart {
     conf.set(YarnConfiguration.RM_STORE, MemoryRMStateStore.class.getName());
     rmAddr = new InetSocketAddress("localhost", 8032);
     Assert.assertTrue(YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS > 1);
+  }
+
+  @After
+  public void tearDown() {
+    TEMP_DIR.delete();
   }
 
   @SuppressWarnings("rawtypes")
@@ -381,7 +394,7 @@ public class TestRMRestart {
     Assert.assertEquals(4, rmAppState.size());
  }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartAppRunningAMFailed() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -427,7 +440,7 @@ public class TestRMRestart {
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartWaitForPreviousAMToFinish() throws Exception {
     // testing 3 cases
     // After RM restarts
@@ -588,10 +601,66 @@ public class TestRMRestart {
         RMAppAttemptState.SCHEDULED);
     Assert.assertEquals(RMAppAttemptState.SCHEDULED, app2
         .getCurrentAppAttempt().getAppAttemptState());
-
   }
 
-  @Test
+  // Test RM restarts after previous attempt succeeded and was saved into state
+  // store but before the RMAppAttempt notifies RMApp that it has succeeded. On
+  // recovery, RMAppAttempt should send the AttemptFinished event to RMApp so
+  // that RMApp can recover its state.
+  @Test (timeout = 60000)
+  public void testRMRestartWaitForPreviousSucceededAttempt() throws Exception {
+    conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
+    MemoryRMStateStore memStore = new MemoryRMStateStore() {
+      int count = 0;
+
+      @Override
+      public void updateApplicationStateInternal(ApplicationId appId,
+          ApplicationStateDataPBImpl appStateData) throws Exception {
+        if (count == 0) {
+          // do nothing; simulate app final state is not saved.
+          LOG.info(appId + " final state is not saved.");
+          count++;
+        } else {
+          super.updateApplicationStateInternal(appId, appStateData);
+        }
+      }
+    };
+    memStore.init(conf);
+    RMState rmState = memStore.getState();
+    Map<ApplicationId, ApplicationState> rmAppState =
+        rmState.getApplicationState();
+
+    // start RM
+    MockRM rm1 = new MockRM(conf, memStore);
+    rm1.start();
+    MockNM nm1 = rm1.registerNode("127.0.0.1:1234", 15120);
+    RMApp app0 = rm1.submitApp(200);
+    MockAM am0 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
+
+    FinishApplicationMasterRequest req =
+        FinishApplicationMasterRequest.newInstance(
+          FinalApplicationStatus.SUCCEEDED, "", "");
+    am0.unregisterAppAttempt(req, true);
+    am0.waitForState(RMAppAttemptState.FINISHING);
+    // app final state is not saved. This guarantees that RMApp cannot be
+    // recovered via its own saved state, but only via the event notification
+    // from the RMAppAttempt on recovery.
+    Assert.assertNull(rmAppState.get(app0.getApplicationId()).getState());
+
+    // start RM
+    MockRM rm2 = new MockRM(conf, memStore);
+    nm1.setResourceTrackerService(rm2.getResourceTrackerService());
+    rm2.start();
+
+    rm2.waitForState(app0.getCurrentAppAttempt().getAppAttemptId(),
+      RMAppAttemptState.FINISHED);
+    rm2.waitForState(app0.getApplicationId(), RMAppState.FINISHED);
+    // app final state is saved via the finish event from attempt.
+    Assert.assertEquals(RMAppState.FINISHED,
+      rmAppState.get(app0.getApplicationId()).getState());
+  }
+
+  @Test (timeout = 60000)
   public void testRMRestartFailedApp() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 1);
     MemoryRMStateStore memStore = new MemoryRMStateStore();
@@ -640,7 +709,7 @@ public class TestRMRestart {
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartKilledApp() throws Exception{
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -688,7 +757,7 @@ public class TestRMRestart {
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartKilledAppWithNoAttempts() throws Exception {
     MemoryRMStateStore memStore = new MemoryRMStateStore() {
       @Override
@@ -728,7 +797,7 @@ public class TestRMRestart {
     Assert.assertTrue(loadedApp0.getAppAttempts().size() == 0);
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartSucceededApp() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
       YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -780,7 +849,7 @@ public class TestRMRestart {
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartGetApplicationList() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 1);
     MemoryRMStateStore memStore = new MemoryRMStateStore();
@@ -915,7 +984,7 @@ public class TestRMRestart {
         ((MemoryRMStateStore) rm.getRMContext().getStateStore()).getState();
     Map<ApplicationId, ApplicationState> rmAppState =
         rmState.getApplicationState();
-    am.unregisterAppAttempt(req);
+    am.unregisterAppAttempt(req,true);
     am.waitForState(RMAppAttemptState.FINISHING);
     nm.nodeHeartbeat(am.getApplicationAttemptId(), 1, ContainerState.COMPLETE);
     am.waitForState(RMAppAttemptState.FINISHED);
@@ -928,7 +997,7 @@ public class TestRMRestart {
       appState.getAttempt(am.getApplicationAttemptId()).getState());
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMRestartOnMaxAppAttempts() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -1002,7 +1071,7 @@ public class TestRMRestart {
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testDelegationTokenRestoredInDelegationTokenRenewer()
       throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
@@ -1032,7 +1101,7 @@ public class TestRMRestart {
           userText1);
     Token<RMDelegationTokenIdentifier> token1 =
         new Token<RMDelegationTokenIdentifier>(dtId1,
-          rm1.getRMDTSecretManager());
+          rm1.getRMContext().getRMDelegationTokenSecretManager());
     SecurityUtil.setTokenService(token1, rmAddr);
     ts.addToken(userText1, token1);
     tokenSet.add(token1);
@@ -1043,7 +1112,7 @@ public class TestRMRestart {
           userText2);
     Token<RMDelegationTokenIdentifier> token2 =
         new Token<RMDelegationTokenIdentifier>(dtId2,
-          rm1.getRMDTSecretManager());
+          rm1.getRMContext().getRMDelegationTokenSecretManager());
     SecurityUtil.setTokenService(token2, rmAddr);
     ts.addToken(userText2, token2);
     tokenSet.add(token2);
@@ -1102,7 +1171,7 @@ public class TestRMRestart {
     }
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testAppAttemptTokensRestoredOnRMRestart() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
     conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
@@ -1186,13 +1255,13 @@ public class TestRMRestart {
     // assert AMRMTokenSecretManager also knows about the AMRMToken password
     Token<AMRMTokenIdentifier> amrmToken = loadedAttempt1.getAMRMToken();
     Assert.assertArrayEquals(amrmToken.getPassword(),
-      rm2.getAMRMTokenSecretManager().retrievePassword(
+      rm2.getRMContext().getAMRMTokenSecretManager().retrievePassword(
         amrmToken.decodeIdentifier()));
     rm1.stop();
     rm2.stop();
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMDelegationTokenRestoredOnRMRestart() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
     conf.set(
@@ -1245,19 +1314,20 @@ public class TestRMRestart {
     Assert.assertNotNull(appState);
 
     // assert all master keys are saved
-    Set<DelegationKey> allKeysRM1 = rm1.getRMDTSecretManager().getAllMasterKeys();
+    Set<DelegationKey> allKeysRM1 = rm1.getRMContext()
+      .getRMDelegationTokenSecretManager().getAllMasterKeys();
     Assert.assertEquals(allKeysRM1, rmDTMasterKeyState);
 
     // assert all tokens are saved
     Map<RMDelegationTokenIdentifier, Long> allTokensRM1 =
-        rm1.getRMDTSecretManager().getAllTokens();
+        rm1.getRMContext().getRMDelegationTokenSecretManager().getAllTokens();
     Assert.assertEquals(tokenIdentSet, allTokensRM1.keySet());
     Assert.assertEquals(allTokensRM1, rmDTState);
     
     // assert sequence number is saved
-    Assert.assertEquals(
-      rm1.getRMDTSecretManager().getLatestDTSequenceNumber(),
-      rmState.getRMDTSecretManagerState().getDTSequenceNumber());
+    Assert.assertEquals(rm1.getRMContext().getRMDelegationTokenSecretManager()
+      .getLatestDTSequenceNumber(), rmState.getRMDTSecretManagerState()
+      .getDTSequenceNumber());
 
     // request one more token
     GetDelegationTokenRequest request2 =
@@ -1272,16 +1342,15 @@ public class TestRMRestart {
 
     // cancel token2
     try{
-      rm1.getRMDTSecretManager().cancelToken(token2,
+      rm1.getRMContext().getRMDelegationTokenSecretManager().cancelToken(token2,
         UserGroupInformation.getCurrentUser().getUserName());
     } catch(Exception e) {
       Assert.fail();
     }
 
     // Assert the token which has the latest delegationTokenSequenceNumber is removed
-    Assert.assertEquals(
-      rm1.getRMDTSecretManager().getLatestDTSequenceNumber(),
-      dtId2.getSequenceNumber());
+    Assert.assertEquals(rm1.getRMContext().getRMDelegationTokenSecretManager()
+      .getLatestDTSequenceNumber(), dtId2.getSequenceNumber());
     Assert.assertFalse(rmDTState.containsKey(dtId2));
 
     // start new RM
@@ -1290,16 +1359,17 @@ public class TestRMRestart {
 
     // assert master keys and tokens are populated back to DTSecretManager
     Map<RMDelegationTokenIdentifier, Long> allTokensRM2 =
-        rm2.getRMDTSecretManager().getAllTokens();
+        rm2.getRMContext().getRMDelegationTokenSecretManager().getAllTokens();
     Assert.assertEquals(allTokensRM2.keySet(), allTokensRM1.keySet());
     // rm2 has its own master keys when it starts, we use containsAll here
-    Assert.assertTrue(rm2.getRMDTSecretManager().getAllMasterKeys()
-      .containsAll(allKeysRM1));
+    Assert.assertTrue(rm2.getRMContext().getRMDelegationTokenSecretManager()
+      .getAllMasterKeys().containsAll(allKeysRM1));
 
     // assert sequenceNumber is properly recovered,
     // even though the token which has max sequenceNumber is not stored
-    Assert.assertEquals(rm1.getRMDTSecretManager().getLatestDTSequenceNumber(),
-      rm2.getRMDTSecretManager().getLatestDTSequenceNumber());
+    Assert.assertEquals(rm1.getRMContext().getRMDelegationTokenSecretManager()
+      .getLatestDTSequenceNumber(), rm2.getRMContext()
+      .getRMDelegationTokenSecretManager().getLatestDTSequenceNumber());
 
     // renewDate before renewing
     Long renewDateBeforeRenew = allTokensRM2.get(dtId1);
@@ -1307,12 +1377,14 @@ public class TestRMRestart {
       // Sleep for one millisecond to make sure renewDataAfterRenew is greater
       Thread.sleep(1);
       // renew recovered token
-      rm2.getRMDTSecretManager().renewToken(token1, "renewer1");
+      rm2.getRMContext().getRMDelegationTokenSecretManager().renewToken(
+          token1, "renewer1");
     } catch(Exception e) {
       Assert.fail();
     }
 
-    allTokensRM2 = rm2.getRMDTSecretManager().getAllTokens();
+    allTokensRM2 = rm2.getRMContext().getRMDelegationTokenSecretManager()
+      .getAllTokens();
     Long renewDateAfterRenew = allTokensRM2.get(dtId1);
     // assert token is renewed
     Assert.assertTrue(renewDateAfterRenew > renewDateBeforeRenew);
@@ -1323,14 +1395,15 @@ public class TestRMRestart {
     Assert.assertFalse(rmDTState.containsValue(renewDateBeforeRenew));
 
     try{
-      rm2.getRMDTSecretManager().cancelToken(token1,
+      rm2.getRMContext().getRMDelegationTokenSecretManager().cancelToken(token1,
         UserGroupInformation.getCurrentUser().getUserName());
     } catch(Exception e) {
       Assert.fail();
     }
 
     // assert token is removed from state after its cancelled
-    allTokensRM2 = rm2.getRMDTSecretManager().getAllTokens();
+    allTokensRM2 = rm2.getRMContext().getRMDelegationTokenSecretManager()
+      .getAllTokens();
     Assert.assertFalse(allTokensRM2.containsKey(dtId1));
     Assert.assertFalse(rmDTState.containsKey(dtId1));
 
@@ -1341,7 +1414,7 @@ public class TestRMRestart {
 
   // This is to test submit an application to the new RM with the old delegation
   // token got from previous RM.
-  @Test
+  @Test (timeout = 60000)
   public void testAppSubmissionWithOldDelegationTokenAfterRMRestart()
       throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
@@ -1376,7 +1449,7 @@ public class TestRMRestart {
     rm2.waitForState(app.getApplicationId(), RMAppState.ACCEPTED);
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testRMStateStoreDispatcherDrainedOnRMStop() throws Exception {
     MemoryRMStateStore memStore = new MemoryRMStateStore() {
       volatile boolean wait = true;
@@ -1435,7 +1508,7 @@ public class TestRMRestart {
     Assert.assertTrue(rmAppState.size() == NUM_APPS);
   }
 
-  @Test
+  @Test (timeout = 60000)
   public void testFinishedAppRemovalAfterRMRestart() throws Exception {
     MemoryRMStateStore memStore = new MemoryRMStateStore();
     conf.setInt(YarnConfiguration.RM_MAX_COMPLETED_APPLICATIONS, 1);
@@ -1507,7 +1580,7 @@ public class TestRMRestart {
   // This is to test Killing application should be able to wait until app
   // reaches killed state and also check that attempt state is saved before app
   // state is saved.
-  @Test
+  @Test (timeout = 60000)
   public void testClientRetryOnKillingApplication() throws Exception {
     MemoryRMStateStore memStore = new TestMemoryRMStateStore();
     memStore.init(conf);
@@ -1545,7 +1618,7 @@ public class TestRMRestart {
   }
 
   @SuppressWarnings("resource")
-  @Test
+  @Test (timeout = 60000)
   public void testQueueMetricsOnRMRestart() throws Exception {
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -1605,15 +1678,14 @@ public class TestRMRestart {
             ContainerState.COMPLETE, "Killed AM container", 143);
     containerStatuses.add(containerStatus);
     nm1.registerNode(containerStatuses);
-    int timeoutSecs = 0;
-    while (loadedApp1.getAppAttempts().size() != 2 && timeoutSecs++ < 40) {;
+    while (loadedApp1.getAppAttempts().size() != 2) {
       Thread.sleep(200);
     }
-
-    assertQueueMetrics(qm2, 1, 1, 0, 0);
-    nm1.nodeHeartbeat(true);
     attempt1 = loadedApp1.getCurrentAppAttempt();
     attemptId1 = attempt1.getAppAttemptId();
+    rm2.waitForState(attemptId1, RMAppAttemptState.SCHEDULED);
+    assertQueueMetrics(qm2, 1, 1, 0, 0);
+    nm1.nodeHeartbeat(true);
     rm2.waitForState(attemptId1, RMAppAttemptState.ALLOCATED);
     assertQueueMetrics(qm2, 1, 0, 1, 0);
     am1 = rm2.sendAMLaunched(attempt1.getAppAttemptId());
@@ -1666,6 +1738,113 @@ public class TestRMRestart {
         appsCompleted + appsCompletedCarryOn);
   }
 
+  @Test (timeout = 60000)
+  public void testDecomissionedNMsMetricsOnRMRestart() throws Exception {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.set(YarnConfiguration.RM_NODES_EXCLUDE_FILE_PATH,
+      hostFile.getAbsolutePath());
+    writeToHostsFile("");
+    MockRM rm1 = new MockRM(conf);
+    rm1.start();
+    rm1.registerNode("localhost:1234", 8000);
+    rm1.registerNode("host2:1234", 8000);
+    Assert
+      .assertEquals(0, ClusterMetrics.getMetrics().getNumDecommisionedNMs());
+    String ip = NetUtils.normalizeHostName("localhost");
+    // Add 2 hosts to exclude list.
+    writeToHostsFile("host2", ip);
+
+    // refresh nodes
+    rm1.getNodesListManager().refreshNodes(conf);
+    Assert
+      .assertEquals(2, ClusterMetrics.getMetrics().getNumDecommisionedNMs());
+
+    // restart RM.
+    MockRM rm2 = new MockRM(conf);
+    rm2.start();
+    Assert
+      .assertEquals(2, ClusterMetrics.getMetrics().getNumDecommisionedNMs());
+    rm1.stop();
+    rm2.stop();
+  }
+
+  // Test Delegation token is renewed synchronously so that recover events
+  // can be processed before any other external incoming events, specifically
+  // the ContainerFinished event on NM re-registraton.
+  @Test (timeout = 20000)
+  public void testSynchronouslyRenewDTOnRecovery() throws Exception {
+    conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 2);
+    conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
+      "kerberos");
+    MemoryRMStateStore memStore = new MemoryRMStateStore();
+    memStore.init(conf);
+
+    // start RM
+    MockRM rm1 = new MockRM(conf, memStore);
+    rm1.start();
+    final MockNM nm1 =
+        new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
+    nm1.registerNode();
+    RMApp app0 = rm1.submitApp(200);
+    final MockAM am0 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
+
+    MockRM rm2 = new MockRM(conf, memStore) {
+      @Override
+      protected ResourceTrackerService createResourceTrackerService() {
+        return new ResourceTrackerService(this.rmContext,
+          this.nodesListManager, this.nmLivelinessMonitor,
+          this.rmContext.getContainerTokenSecretManager(),
+          this.rmContext.getNMTokenSecretManager()) {
+          @Override
+          protected void serviceStart() throws Exception {
+            // send the container_finished event as soon as the
+            // ResourceTrackerService is started.
+            super.serviceStart();
+            nm1.setResourceTrackerService(getResourceTrackerService());
+            List<ContainerStatus> status = new ArrayList<ContainerStatus>();
+            ContainerId amContainer =
+                ContainerId.newInstance(am0.getApplicationAttemptId(), 1);
+            status.add(ContainerStatus.newInstance(amContainer,
+              ContainerState.COMPLETE, "AM container exit", 143));
+            nm1.registerNode(status);
+          }
+        };
+      }
+    };
+    // Re-start RM
+    rm2.start();
+
+    // wait for the 2nd attempt to be started.
+    RMApp loadedApp0 =
+        rm2.getRMContext().getRMApps().get(app0.getApplicationId());
+    int timeoutSecs = 0;
+    while (loadedApp0.getAppAttempts().size() != 2 && timeoutSecs++ < 40) {
+      Thread.sleep(200);
+    }
+    MockAM am1 = MockRM.launchAndRegisterAM(loadedApp0, rm2, nm1);
+    MockRM.finishAMAndVerifyAppState(loadedApp0, rm2, nm1, am1);
+  }
+
+  private void writeToHostsFile(String... hosts) throws IOException {
+    if (!hostFile.exists()) {
+      TEMP_DIR.mkdirs();
+      hostFile.createNewFile();
+    }
+    FileOutputStream fStream = null;
+    try {
+      fStream = new FileOutputStream(hostFile);
+      for (int i = 0; i < hosts.length; i++) {
+        fStream.write(hosts[i].getBytes());
+        fStream.write(System.getProperty("line.separator").getBytes());
+      }
+    } finally {
+      if (fStream != null) {
+        IOUtils.closeStream(fStream);
+        fStream = null;
+      }
+    }
+  }
+
   public class TestMemoryRMStateStore extends MemoryRMStateStore {
     int count = 0;
     public int updateApp = 0;
@@ -1697,9 +1876,17 @@ public class TestRMRestart {
     }
 
     @Override
+    public void init(Configuration conf) {
+      // reset localServiceAddress.
+      RMDelegationTokenIdentifier.Renewer.setSecretManager(null, null);
+      super.init(conf);
+    }
+
+    @Override
     protected ClientRMService createClientRMService() {
       return new ClientRMService(getRMContext(), getResourceScheduler(),
-          rmAppManager, applicationACLsManager, null, getRMDTSecretManager()){
+          rmAppManager, applicationACLsManager, null,
+          getRMContext().getRMDelegationTokenSecretManager()){
         @Override
         protected void serviceStart() throws Exception {
           // do nothing

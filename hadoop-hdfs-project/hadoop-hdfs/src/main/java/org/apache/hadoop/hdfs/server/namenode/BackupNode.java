@@ -134,6 +134,7 @@ public class BackupNode extends NameNode {
                                 BN_SAFEMODE_EXTENSION_DEFAULT);
     BackupImage bnImage = new BackupImage(conf);
     this.namesystem = new FSNamesystem(conf, bnImage);
+    namesystem.dir.disableQuotaChecks();
     bnImage.setNamesystem(namesystem);
     bnImage.recoverCreateRead();
   }
@@ -354,7 +355,7 @@ public class BackupNode extends NameNode {
 
   /**
    * Register this backup node with the active name-node.
-   * @param nsInfo
+   * @param nsInfo namespace information
    * @throws IOException
    */
   private void registerWith(NamespaceInfo nsInfo) throws IOException {
@@ -413,9 +414,9 @@ public class BackupNode extends NameNode {
       LOG.fatal(errorMsg);
       throw new IOException(errorMsg);
     }
-    assert HdfsConstants.LAYOUT_VERSION == nsInfo.getLayoutVersion() :
+    assert HdfsConstants.NAMENODE_LAYOUT_VERSION == nsInfo.getLayoutVersion() :
       "Active and backup node layout versions must be the same. Expected: "
-      + HdfsConstants.LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
+      + HdfsConstants.NAMENODE_LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
     return nsInfo;
   }
 

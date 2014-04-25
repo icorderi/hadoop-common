@@ -79,7 +79,7 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /**
    * Create rolling logs.
-   * 
+   *
    * @param prefix the prefix of the log names.
    * @return rolling logs
    */
@@ -88,6 +88,9 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /** @return a list of volumes. */
   public List<V> getVolumes();
+
+  /** @return a storage with the given storage ID */
+  public DatanodeStorage getStorage(final String storageUuid);
 
   /** @return one or more storage reports for attached volumes. */
   public StorageReport[] getStorageReports(String bpid)
@@ -121,16 +124,14 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /**
    * Returns the specified block's on-disk length (excluding metadata)
-   * @param b
    * @return   the specified block's on-disk length (excluding metadta)
-   * @throws IOException
+   * @throws IOException on error
    */
   public long getLength(ExtendedBlock b) throws IOException;
 
   /**
    * Get reference to the replica meta info in the replicasMap. 
    * To be called from methods that are synchronized on {@link FSDataset}
-   * @param blockId
    * @return replica from the replicas map
    */
   @Deprecated
@@ -148,8 +149,8 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   
   /**
    * Returns an input stream at specified offset of the specified block
-   * @param b
-   * @param seekOffset
+   * @param b block
+   * @param seekOffset offset with in the block to seek to
    * @return an input stream to read the contents of the specified block,
    *  starting at the offset
    * @throws IOException
@@ -160,9 +161,6 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   /**
    * Returns an input stream at specified offset of the specified block
    * The block is still in the tmp directory and is not finalized
-   * @param b
-   * @param blkoff
-   * @param ckoff
    * @return an input stream to read the contents of the specified block,
    *  starting at the offset
    * @throws IOException
@@ -253,7 +251,6 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * Finalizes the block previously opened for writing using writeToBlock.
    * The block size is what is in the parameter b and it must match the amount
    *  of data written
-   * @param b
    * @throws IOException
    */
   public void finalizeBlock(ExtendedBlock b) throws IOException;
@@ -261,7 +258,6 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   /**
    * Unfinalizes the block previously opened for writing using writeToBlock.
    * The temporary file associated with this block is deleted.
-   * @param b
    * @throws IOException
    */
   public void unfinalizeBlock(ExtendedBlock b) throws IOException;
@@ -286,14 +282,12 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /**
    * Is the block valid?
-   * @param b
    * @return - true if the specified block is valid
    */
   public boolean isValidBlock(ExtendedBlock b);
 
   /**
    * Is the block a valid RBW?
-   * @param b
    * @return - true if the specified block is a valid RBW
    */
   public boolean isValidRbw(ExtendedBlock b);
@@ -319,6 +313,14 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @param blockIds - blocks ids to uncache
    */
   public void uncache(String bpid, long[] blockIds);
+
+  /**
+   * Determine if the specified block is cached.
+   * @param bpid Block pool id
+   * @param blockIds - block id
+   * @return true if the block is cached
+   */
+  public boolean isCached(String bpid, long blockId);
 
     /**
      * Check if all the data directories are healthy
@@ -405,11 +407,29 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * Get a {@link HdfsBlocksMetadata} corresponding to the list of blocks in 
    * <code>blocks</code>.
    * 
-   * @param blocks List of blocks for which to return metadata
+   * @param bpid pool to query
+   * @param blockIds List of block ids for which to return metadata
    * @return metadata Metadata for the list of blocks
    * @throws IOException
    */
-  public HdfsBlocksMetadata getHdfsBlocksMetadata(List<ExtendedBlock> blocks)
-      throws IOException;
+  public HdfsBlocksMetadata getHdfsBlocksMetadata(String bpid,
+      long[] blockIds) throws IOException;
+
+  /**
+   * Enable 'trash' for the given dataset. When trash is enabled, files are
+   * moved to a separate trash directory instead of being deleted immediately.
+   * This can be useful for example during rolling upgrades.
+   */
+  public void enableTrash(String bpid);
+
+  /**
+   * Restore trash
+   */
+  public void restoreTrash(String bpid);
+
+  /**
+   * @return true when trash is enabled
+   */
+  public boolean trashEnabled(String bpid);
 }
 

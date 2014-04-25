@@ -91,13 +91,13 @@ public class EditLogTailer {
    * from finalized log segments, the Standby will only be as up-to-date as how
    * often the logs are rolled.
    */
-  private long logRollPeriodMs;
+  private final long logRollPeriodMs;
 
   /**
    * How often the Standby should check if there are new finalized segment(s)
    * available to be read from.
    */
-  private long sleepTimeMs;
+  private final long sleepTimeMs;
   
   public EditLogTailer(FSNamesystem namesystem, Configuration conf) {
     this.tailerThread = new EditLogTailerThread();
@@ -135,9 +135,12 @@ public class EditLogTailer {
   
   private NamenodeProtocol getActiveNodeProxy() throws IOException {
     if (cachedActiveProxy == null) {
-      NamenodeProtocolPB proxy = 
-        RPC.waitForProxy(NamenodeProtocolPB.class,
-            RPC.getProtocolVersion(NamenodeProtocolPB.class), activeAddr, conf);
+      int rpcTimeout = conf.getInt(
+          DFSConfigKeys.DFS_HA_LOGROLL_RPC_TIMEOUT_KEY,
+          DFSConfigKeys.DFS_HA_LOGROLL_RPC_TIMEOUT_DEFAULT);
+      NamenodeProtocolPB proxy = RPC.waitForProxy(NamenodeProtocolPB.class,
+          RPC.getProtocolVersion(NamenodeProtocolPB.class), activeAddr, conf,
+          rpcTimeout, Long.MAX_VALUE);
       cachedActiveProxy = new NamenodeProtocolTranslatorPB(proxy);
     }
     assert cachedActiveProxy != null;
@@ -224,7 +227,7 @@ public class EditLogTailer {
       // disk are ignored.
       long editsLoaded = 0;
       try {
-        editsLoaded = image.loadEdits(streams, namesystem, null);
+        editsLoaded = image.loadEdits(streams, namesystem);
       } catch (EditLogInputException elie) {
         editsLoaded = elie.getNumEditsLoaded();
         throw elie;

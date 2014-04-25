@@ -17,9 +17,10 @@
  */
 package org.apache.hadoop.security;
 
-import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN;
-import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN_DEFAULT;
 import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN_DEFAULT;
+import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 import java.io.File;
 import java.io.IOException;
@@ -30,6 +31,7 @@ import java.security.Principal;
 import java.security.PrivilegedAction;
 import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -45,9 +47,9 @@ import javax.security.auth.kerberos.KerberosKey;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
 import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag;
 import javax.security.auth.login.LoginContext;
 import javax.security.auth.login.LoginException;
-import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag;
 import javax.security.auth.spi.LoginModule;
 
 import org.apache.commons.logging.Log;
@@ -68,7 +70,6 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Time;
-import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -703,6 +704,35 @@ public class UserGroupInformation {
   }
 
   /**
+   * Create a UserGroupInformation from a Subject with Kerberos principal.
+   *
+   * @param user                The KerberosPrincipal to use in UGI
+   *
+   * @throws IOException        if the kerberos login fails
+   */
+  public static UserGroupInformation getUGIFromSubject(Subject subject)
+      throws IOException {
+    if (subject == null) {
+      throw new IOException("Subject must not be null");
+    }
+
+    if (subject.getPrincipals(KerberosPrincipal.class).isEmpty()) {
+      throw new IOException("Provided Subject must contain a KerberosPrincipal");
+    }
+
+    KerberosPrincipal principal =
+        subject.getPrincipals(KerberosPrincipal.class).iterator().next();
+
+    User ugiUser = new User(principal.getName(),
+        AuthenticationMethod.KERBEROS, null);
+    subject.getPrincipals().add(ugiUser);
+    UserGroupInformation ugi = new UserGroupInformation(subject);
+    ugi.setLogin(null);
+    ugi.setAuthenticationMethod(AuthenticationMethod.KERBEROS);
+    return ugi;
+  }
+
+  /**
    * Get the currently logged in user.
    * @return the logged in user
    * @throws IOException if login fails
@@ -961,7 +991,9 @@ public class UserGroupInformation {
     // register most recent relogin attempt
     user.setLastLogin(now);
     try {
-      LOG.info("Initiating logout for " + getUserName());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Initiating logout for " + getUserName());
+      }
       synchronized (UserGroupInformation.class) {
         // clear up the kerberos state. But the tokens are not cleared! As per
         // the Java kerberos login module code, only the kerberos credentials
@@ -972,7 +1004,9 @@ public class UserGroupInformation {
         login = newLoginContext(
             HadoopConfiguration.KEYTAB_KERBEROS_CONFIG_NAME, getSubject(),
             new HadoopConfiguration());
-        LOG.info("Initiating re-login for " + keytabPrincipal);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Initiating re-login for " + keytabPrincipal);
+        }
         start = Time.now();
         login.login();
         metrics.loginSuccess.add(Time.now() - start);
@@ -1013,7 +1047,9 @@ public class UserGroupInformation {
     // register most recent relogin attempt
     user.setLastLogin(now);
     try {
-      LOG.info("Initiating logout for " + getUserName());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Initiating logout for " + getUserName());
+      }
       //clear up the kerberos state. But the tokens are not cleared! As per 
       //the Java kerberos login module code, only the kerberos credentials
       //are cleared
@@ -1023,7 +1059,9 @@ public class UserGroupInformation {
       login = 
         newLoginContext(HadoopConfiguration.USER_KERBEROS_CONFIG_NAME, 
             getSubject(), new HadoopConfiguration());
-      LOG.info("Initiating re-login for " + getUserName());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Initiating re-login for " + getUserName());
+      }
       login.login();
       setLogin(login);
     } catch (LoginException le) {
@@ -1099,6 +1137,14 @@ public class UserGroupInformation {
   @InterfaceStability.Evolving
   public synchronized static boolean isLoginKeytabBased() throws IOException {
     return getLoginUser().isKeytab;
+  }
+
+  /**
+   * Did the login happen via ticket cache
+   * @return true or false
+   */
+  public static boolean isLoginTicketBased()  throws IOException {
+    return getLoginUser().isKrbTkt;
   }
 
   /**
@@ -1370,7 +1416,7 @@ public class UserGroupInformation {
   public synchronized
   Collection<Token<? extends TokenIdentifier>> getTokens() {
     return Collections.unmodifiableCollection(
-        getCredentialsInternal().getAllTokens());
+        new ArrayList<Token<?>>(getCredentialsInternal().getAllTokens()));
   }
 
   /**
@@ -1560,7 +1606,9 @@ public class UserGroupInformation {
       return Subject.doAs(subject, action);
     } catch (PrivilegedActionException pae) {
       Throwable cause = pae.getCause();
-      LOG.warn("PriviledgedActionException as:"+this+" cause:"+cause);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("PrivilegedActionException as:" + this + " cause:" + cause);
+      }
       if (cause instanceof IOException) {
         throw (IOException) cause;
       } else if (cause instanceof Error) {
@@ -1619,5 +1667,4 @@ public class UserGroupInformation {
       System.out.println("Keytab " + loginUser.isKeytab);
     }
   }
-
 }

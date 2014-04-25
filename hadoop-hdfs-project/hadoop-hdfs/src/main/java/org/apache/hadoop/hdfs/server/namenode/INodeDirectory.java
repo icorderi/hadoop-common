@@ -77,8 +77,11 @@ public class INodeDirectory extends INodeWithAdditionalFields
    * @param other The INodeDirectory to be copied
    * @param adopt Indicate whether or not need to set the parent field of child
    *              INodes to the new node
+   * @param featuresToCopy any number of features to copy to the new node.
+   *              The method will do a reference copy, not a deep copy.
    */
-  public INodeDirectory(INodeDirectory other, boolean adopt, boolean copyFeatures) {
+  public INodeDirectory(INodeDirectory other, boolean adopt,
+      Feature... featuresToCopy) {
     super(other);
     this.children = other.children;
     if (adopt && this.children != null) {
@@ -86,9 +89,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
         child.setParent(this);
       }
     }
-    if (copyFeatures) {
-      this.features = other.features;
-    }
+    this.features = featuresToCopy;
   }
 
   /** @return true unconditionally. */
@@ -145,12 +146,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
    * otherwise, return null.
    */
   public final DirectoryWithQuotaFeature getDirectoryWithQuotaFeature() {
-    for (Feature f : features) {
-      if (f instanceof DirectoryWithQuotaFeature) {
-        return (DirectoryWithQuotaFeature)f;
-      }
-    }
-    return null;
+    return getFeature(DirectoryWithQuotaFeature.class);
   }
 
   /** Is this directory with quota? */
@@ -171,7 +167,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
     return children == null? -1: Collections.binarySearch(children, name);
   }
   
-  protected DirectoryWithSnapshotFeature addSnapshotFeature(
+  public DirectoryWithSnapshotFeature addSnapshotFeature(
       DirectoryDiffList diffs) {
     Preconditions.checkState(!isWithSnapshot(), 
         "Directory is already with snapshot");
@@ -185,12 +181,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
    * otherwise, return null.
    */
   public final DirectoryWithSnapshotFeature getDirectoryWithSnapshotFeature() {
-    for (Feature f : features) {
-      if (f instanceof DirectoryWithSnapshotFeature) {
-        return (DirectoryWithSnapshotFeature) f;
-      }
-    }
-    return null;
+    return getFeature(DirectoryWithSnapshotFeature.class);
   }
 
   /** Is this file has the snapshot feature? */
@@ -231,7 +222,8 @@ public class INodeDirectory extends INodeWithAdditionalFields
   public INodeDirectory replaceSelf4INodeDirectory(final INodeMap inodeMap) {
     Preconditions.checkState(getClass() != INodeDirectory.class,
         "the class is already INodeDirectory, this=%s", this);
-    return replaceSelf(new INodeDirectory(this, true, true), inodeMap);
+    return replaceSelf(new INodeDirectory(this, true, this.getFeatures()),
+      inodeMap);
   }
 
   /** Replace itself with the given directory. */
@@ -363,6 +355,29 @@ public class INodeDirectory extends INodeWithAdditionalFields
     }
     
     return sf.getChild(this, name, snapshotId);
+  }
+
+  /**
+   * Search for the given INode in the children list and the deleted lists of
+   * snapshots.
+   * @return {@link Snapshot#CURRENT_STATE_ID} if the inode is in the children
+   * list; {@link Snapshot#NO_SNAPSHOT_ID} if the inode is neither in the
+   * children list nor in any snapshot; otherwise the snapshot id of the
+   * corresponding snapshot diff list.
+   */
+  int searchChild(INode inode) {
+    INode child = getChild(inode.getLocalNameBytes(), Snapshot.CURRENT_STATE_ID);
+    if (child != inode) {
+      // inode is not in parent's children list, thus inode must be in
+      // snapshot. identify the snapshot id and later add it into the path
+      DirectoryDiffList diffs = getDiffs();
+      if (diffs == null) {
+        return Snapshot.NO_SNAPSHOT_ID;
+      }
+      return diffs.findSnapshotDeleted(inode);
+    } else {
+      return Snapshot.CURRENT_STATE_ID;
+    }
   }
   
   /**

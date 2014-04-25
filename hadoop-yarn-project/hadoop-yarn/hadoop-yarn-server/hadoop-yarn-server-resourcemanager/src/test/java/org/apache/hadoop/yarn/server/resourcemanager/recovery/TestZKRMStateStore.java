@@ -20,13 +20,9 @@ package org.apache.hadoop.yarn.server.resourcemanager.recovery;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.mock;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -34,15 +30,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.service.Service;
-import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
-import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
-import org.apache.hadoop.yarn.api.records.Priority;
-import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.server.resourcemanager.ClientRMService;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.RMStateVersion;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.RMStateVersionPBImpl;
@@ -54,6 +43,7 @@ import org.junit.Test;
 public class TestZKRMStateStore extends RMStateStoreTestBase {
 
   public static final Log LOG = LogFactory.getLog(TestZKRMStateStore.class);
+  private static final int ZK_TIMEOUT_MS = 1000;
 
   class TestZKRMStateStoreTester implements RMStateStoreHelper {
 
@@ -141,8 +131,11 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
     conf.setBoolean(YarnConfiguration.RECOVERY_ENABLED, true);
     conf.set(YarnConfiguration.RM_STORE, ZKRMStateStore.class.getName());
     conf.set(YarnConfiguration.RM_ZK_ADDRESS, hostPort);
+    conf.setInt(YarnConfiguration.RM_ZK_TIMEOUT_MS, ZK_TIMEOUT_MS);
     conf.set(YarnConfiguration.RM_HA_ID, rmId);
-    for (String rpcAddress : YarnConfiguration.RM_SERVICES_ADDRESS_CONF_KEYS) {
+    conf.set(YarnConfiguration.RM_WEBAPP_ADDRESS, "localhost:0");
+
+    for (String rpcAddress : YarnConfiguration.getServiceAddressConfKeys(conf)) {
       for (String id : HAUtil.getRMHAIds(conf)) {
         conf.set(HAUtil.addSuffix(rpcAddress, id), "localhost:0");
       }
@@ -159,6 +152,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
         HAServiceProtocol.RequestSource.REQUEST_BY_USER);
 
     Configuration conf1 = createHARMConf("rm1,rm2", "rm1", 1234);
+    conf1.setBoolean(YarnConfiguration.AUTO_FAILOVER_ENABLED, false);
     ResourceManager rm1 = new ResourceManager();
     rm1.init(conf1);
     rm1.start();
@@ -170,6 +164,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
         rm1.getRMContext().getRMAdminService().getServiceStatus().getState());
 
     Configuration conf2 = createHARMConf("rm1,rm2", "rm2", 5678);
+    conf2.setBoolean(YarnConfiguration.AUTO_FAILOVER_ENABLED, false);
     ResourceManager rm2 = new ResourceManager();
     rm2.init(conf2);
     rm2.start();
@@ -180,26 +175,7 @@ public class TestZKRMStateStore extends RMStateStoreTestBase {
         HAServiceProtocol.HAServiceState.ACTIVE,
         rm2.getRMContext().getRMAdminService().getServiceStatus().getState());
 
-    // Submitting an application to RM1 to trigger a state store operation.
-    // RM1 should realize that it got fenced and is not the Active RM anymore.
-    Map mockMap = mock(Map.class);
-    ApplicationSubmissionContext asc =
-        ApplicationSubmissionContext.newInstance(
-            ApplicationId.newInstance(1000, 1),
-            "testApplication", // app Name
-            "default", // queue name
-            Priority.newInstance(0),
-            ContainerLaunchContext.newInstance(mockMap, mockMap,
-                new ArrayList<String>(), mockMap, mock(ByteBuffer.class),
-                mockMap),
-            false, // unmanaged AM
-            true, // cancelTokens
-            1, // max app attempts
-            Resource.newInstance(1024, 1));
-    ClientRMService rmService = rm1.getClientRMService();
-    rmService.submitApplication(SubmitApplicationRequest.newInstance(asc));
-
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < ZK_TIMEOUT_MS / 50; i++) {
       if (HAServiceProtocol.HAServiceState.ACTIVE ==
           rm1.getRMContext().getRMAdminService().getServiceStatus().getState()) {
         Thread.sleep(100);

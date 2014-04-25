@@ -32,6 +32,7 @@ import org.apache.hadoop.hdfs.qjournal.client.IPCLoggerChannel;
 import org.apache.hadoop.hdfs.qjournal.client.LoggerTooFarBehindException;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocol;
 import org.apache.hadoop.hdfs.qjournal.protocol.RequestInfo;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
@@ -45,7 +46,7 @@ public class TestIPCLoggerChannel {
   private static final Log LOG = LogFactory.getLog(
       TestIPCLoggerChannel.class);
   
-  private Configuration conf = new Configuration();
+  private final Configuration conf = new Configuration();
   private static final NamespaceInfo FAKE_NSINFO = new NamespaceInfo(
       12345, "mycluster", "my-bp", 0L);
   private static final String JID = "test-journalid";
@@ -53,7 +54,7 @@ public class TestIPCLoggerChannel {
       new InetSocketAddress(0);
   private static final byte[] FAKE_DATA = new byte[4096];
   
-  private QJournalProtocol mockProxy = Mockito.mock(QJournalProtocol.class);
+  private final QJournalProtocol mockProxy = Mockito.mock(QJournalProtocol.class);
   private IPCLoggerChannel ch;
   
   private static final int LIMIT_QUEUE_SIZE_MB = 1;
@@ -172,7 +173,7 @@ public class TestIPCLoggerChannel {
         Mockito.<RequestInfo>any());
     
     // After a roll, sending new edits should not fail.
-    ch.startLogSegment(3L).get();
+    ch.startLogSegment(3L, NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION).get();
     assertFalse(ch.isOutOfSync());
 
     ch.sendEdits(3L, 3L, 1, FAKE_DATA).get();

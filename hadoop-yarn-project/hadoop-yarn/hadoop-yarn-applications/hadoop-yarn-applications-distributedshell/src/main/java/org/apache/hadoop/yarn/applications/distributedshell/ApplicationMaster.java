@@ -27,6 +27,7 @@ import java.io.StringReader;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -45,14 +46,18 @@ import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
@@ -78,7 +83,10 @@ import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineEvent;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
+import org.apache.hadoop.yarn.client.api.TimelineClient;
 import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.client.api.async.NMClientAsync;
 import org.apache.hadoop.yarn.client.api.async.impl.NMClientAsyncImpl;
@@ -87,6 +95,7 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
+import org.apache.log4j.LogManager;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -157,12 +166,27 @@ public class ApplicationMaster {
 
   private static final Log LOG = LogFactory.getLog(ApplicationMaster.class);
 
+  @VisibleForTesting
+  @Private
+  public static enum DSEvent {
+    DS_APP_ATTEMPT_START, DS_APP_ATTEMPT_END, DS_CONTAINER_START, DS_CONTAINER_END
+  }
+  
+  @VisibleForTesting
+  @Private
+  public static enum DSEntity {
+    DS_APP_ATTEMPT, DS_CONTAINER
+  }
+
   // Configuration
   private Configuration conf;
 
   // Handle to communicate with the Resource Manager
   @SuppressWarnings("rawtypes")
   private AMRMClientAsync amRMClient;
+
+  // In both secure and non-secure modes, this points to the job-submitter.
+  private UserGroupInformation appSubmitterUgi;
 
   // Handle to communicate with the Node Manager
   private NMClientAsync nmClientAsync;
@@ -215,15 +239,16 @@ public class ApplicationMaster {
 
   // Location of shell script ( obtained from info set in env )
   // Shell script path in fs
-  private String shellScriptPath = "";
+  private String scriptPath = "";
   // Timestamp needed for creating a local resource
   private long shellScriptPathTimestamp = 0;
   // File length needed for local resource
   private long shellScriptPathLen = 0;
 
   // Hardcoded path to shell script in launch container's local env
-  private static final String ExecShellStringPath = "ExecShellScript.sh";
-  private static final String ExecBatScripStringtPath = "ExecBatScript.bat";
+  private static final String ExecShellStringPath = Client.SCRIPT_PATH + ".sh";
+  private static final String ExecBatScripStringtPath = Client.SCRIPT_PATH
+      + ".bat";
 
   // Hardcoded path to custom log_properties
   private static final String log4jPath = "log4j.properties";
@@ -232,12 +257,14 @@ public class ApplicationMaster {
   private static final String shellArgsPath = "shellArgs";
 
   private volatile boolean done;
-  private volatile boolean success;
 
   private ByteBuffer allTokens;
 
   // Launch threads
   private List<Thread> launchThreads = new ArrayList<Thread>();
+
+  // Timeline Client
+  private TimelineClient timelineClient;
 
   private final String linux_bash_command = "bash";
   private final String windows_command = "cmd /c";
@@ -254,11 +281,12 @@ public class ApplicationMaster {
       if (!doRun) {
         System.exit(0);
       }
-      result = appMaster.run();
-      appMaster.finish();
+      appMaster.run();
+      result = appMaster.finish();
     } catch (Throwable t) {
       LOG.fatal("Error running ApplicationMaster", t);
-      System.exit(1);
+      LogManager.shutdown();
+      ExitUtil.terminate(1, t);
     }
     if (result) {
       LOG.info("Application Master completed successfully. exiting");
@@ -313,7 +341,6 @@ public class ApplicationMaster {
    * @throws IOException
    */
   public boolean init(String[] args) throws ParseException, IOException {
-
     Options opts = new Options();
     opts.addOption("app_attempt_id", true,
         "App Attempt ID. Not to be used unless for testing purposes");
@@ -427,7 +454,7 @@ public class ApplicationMaster {
     }
 
     if (envs.containsKey(DSConstants.DISTRIBUTEDSHELLSCRIPTLOCATION)) {
-      shellScriptPath = envs.get(DSConstants.DISTRIBUTEDSHELLSCRIPTLOCATION);
+      scriptPath = envs.get(DSConstants.DISTRIBUTEDSHELLSCRIPTLOCATION);
 
       if (envs.containsKey(DSConstants.DISTRIBUTEDSHELLSCRIPTTIMESTAMP)) {
         shellScriptPathTimestamp = Long.valueOf(envs
@@ -438,10 +465,10 @@ public class ApplicationMaster {
             .get(DSConstants.DISTRIBUTEDSHELLSCRIPTLEN));
       }
 
-      if (!shellScriptPath.isEmpty()
+      if (!scriptPath.isEmpty()
           && (shellScriptPathTimestamp <= 0 || shellScriptPathLen <= 0)) {
         LOG.error("Illegal values in env for shell script path" + ", path="
-            + shellScriptPath + ", len=" + shellScriptPathLen + ", timestamp="
+            + scriptPath + ", len=" + shellScriptPathLen + ", timestamp="
             + shellScriptPathTimestamp);
         throw new IllegalArgumentException(
             "Illegal values in env for shell script path");
@@ -460,6 +487,11 @@ public class ApplicationMaster {
     }
     requestPriority = Integer.parseInt(cliParser
         .getOptionValue("priority", "0"));
+
+    // Creating the Timeline Client
+    timelineClient = TimelineClient.createTimelineClient();
+    timelineClient.init(conf);
+    timelineClient.start();
 
     return true;
   }
@@ -480,8 +512,15 @@ public class ApplicationMaster {
    * @throws IOException
    */
   @SuppressWarnings({ "unchecked" })
-  public boolean run() throws YarnException, IOException {
+  public void run() throws YarnException, IOException {
     LOG.info("Starting ApplicationMaster");
+    try {
+      publishApplicationAttemptEvent(timelineClient, appAttemptID.toString(),
+          DSEvent.DS_APP_ATTEMPT_START);
+    } catch (Exception e) {
+      LOG.error("App Attempt start event coud not be pulished for "
+          + appAttemptID.toString(), e);
+    }
 
     Credentials credentials =
         UserGroupInformation.getCurrentUser().getCredentials();
@@ -489,13 +528,22 @@ public class ApplicationMaster {
     credentials.writeTokenStorageToStream(dob);
     // Now remove the AM->RM token so that containers cannot access it.
     Iterator<Token<?>> iter = credentials.getAllTokens().iterator();
+    LOG.info("Executing with tokens:");
     while (iter.hasNext()) {
       Token<?> token = iter.next();
+      LOG.info(token);
       if (token.getKind().equals(AMRMTokenIdentifier.KIND_NAME)) {
         iter.remove();
       }
     }
     allTokens = ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
+
+    // Create appSubmitterUgi and add original tokens to it
+    String appSubmitterUserName =
+        System.getenv(ApplicationConstants.Environment.USER.name());
+    appSubmitterUgi =
+        UserGroupInformation.createRemoteUser(appSubmitterUserName);
+    appSubmitterUgi.addCredentials(credentials);
 
     AMRMClientAsync.CallbackHandler allocListener = new RMCallbackHandler();
     amRMClient = AMRMClientAsync.createAMRMClientAsync(1000, allocListener);
@@ -543,7 +591,7 @@ public class ApplicationMaster {
     }
 
     List<Container> previousAMRunningContainers =
-        response.getContainersFromPreviousAttempt();
+        response.getContainersFromPreviousAttempts();
     LOG.info("Received " + previousAMRunningContainers.size()
         + " previous AM's running containers on AM registration.");
     numAllocatedContainers.addAndGet(previousAMRunningContainers.size());
@@ -561,7 +609,13 @@ public class ApplicationMaster {
       amRMClient.addContainerRequest(containerAsk);
     }
     numRequestedContainers.set(numTotalContainersToRequest);
-    return success;
+    try {
+      publishApplicationAttemptEvent(timelineClient, appAttemptID.toString(),
+          DSEvent.DS_APP_ATTEMPT_END);
+    } catch (Exception e) {
+      LOG.error("App Attempt start event coud not be pulished for "
+          + appAttemptID.toString(), e);
+    }
   }
 
   @VisibleForTesting
@@ -569,7 +623,8 @@ public class ApplicationMaster {
     return new NMCallbackHandler(this);
   }
 
-  protected void finish() {
+  @VisibleForTesting
+  protected boolean finish() {
     // wait for completion.
     while (!done
         && (numCompletedContainers.get() != numTotalContainers)) {
@@ -600,7 +655,7 @@ public class ApplicationMaster {
 
     FinalApplicationStatus appStatus;
     String appMessage = null;
-    success = true;
+    boolean success = true;
     if (numFailedContainers.get() == 0 && 
         numCompletedContainers.get() == numTotalContainers) {
       appStatus = FinalApplicationStatus.SUCCEEDED;
@@ -621,6 +676,8 @@ public class ApplicationMaster {
     }
     
     amRMClient.stop();
+
+    return success;
   }
   
   private class RMCallbackHandler implements AMRMClientAsync.CallbackHandler {
@@ -662,6 +719,12 @@ public class ApplicationMaster {
           numCompletedContainers.incrementAndGet();
           LOG.info("Container completed successfully." + ", containerId="
               + containerStatus.getContainerId());
+        }
+        try {
+          publishContainerEndEvent(timelineClient, containerStatus);
+        } catch (Exception e) {
+          LOG.error("Container start event could not be pulished for "
+              + containerStatus.getContainerId().toString(), e);
         }
       }
       
@@ -777,6 +840,13 @@ public class ApplicationMaster {
       if (container != null) {
         applicationMaster.nmClientAsync.getContainerStatusAsync(containerId, container.getNodeId());
       }
+      try {
+        ApplicationMaster.publishContainerStartEvent(
+            applicationMaster.timelineClient, container);
+      } catch (Exception e) {
+        LOG.error("Container start event coud not be pulished for "
+            + container.getId().toString(), e);
+      }
     }
 
     @Override
@@ -843,17 +913,37 @@ public class ApplicationMaster {
       // resources too.
       // In this scenario, if a shell script is specified, we need to have it
       // copied and made available to the container.
-      if (!shellScriptPath.isEmpty()) {
+      if (!scriptPath.isEmpty()) {
+        Path renamedScriptPath = null;
+        if (Shell.WINDOWS) {
+          renamedScriptPath = new Path(scriptPath + ".bat");
+        } else {
+          renamedScriptPath = new Path(scriptPath + ".sh");
+        }
+
+        try {
+          // rename the script file based on the underlying OS syntax.
+          renameScriptFile(renamedScriptPath);
+        } catch (Exception e) {
+          LOG.error(
+              "Not able to add suffix (.bat/.sh) to the shell script filename",
+              e);
+          // We know we cannot continue launching the container
+          // so we should release it.
+          numCompletedContainers.incrementAndGet();
+          numFailedContainers.incrementAndGet();
+          return;
+        }
+
         LocalResource shellRsrc = Records.newRecord(LocalResource.class);
         shellRsrc.setType(LocalResourceType.FILE);
         shellRsrc.setVisibility(LocalResourceVisibility.APPLICATION);
         try {
           shellRsrc.setResource(ConverterUtils.getYarnUrlFromURI(new URI(
-              shellScriptPath)));
+            renamedScriptPath.toString())));
         } catch (URISyntaxException e) {
           LOG.error("Error when trying to use shell script path specified"
-              + " in env, path=" + shellScriptPath);
-          e.printStackTrace();
+              + " in env, path=" + renamedScriptPath, e);
 
           // A failure scenario on bad input such as invalid shell script path
           // We know we cannot continue launching the container
@@ -877,7 +967,7 @@ public class ApplicationMaster {
       // Set executable command
       vargs.add(shellCommand);
       // Set shell script path
-      if (!shellScriptPath.isEmpty()) {
+      if (!scriptPath.isEmpty()) {
         vargs.add(Shell.WINDOWS ? ExecBatScripStringtPath
             : ExecShellStringPath);
       }
@@ -909,6 +999,20 @@ public class ApplicationMaster {
       containerListener.addContainer(container.getId(), container);
       nmClientAsync.startContainerAsync(container, ctx);
     }
+  }
+
+  private void renameScriptFile(final Path renamedScriptPath)
+      throws IOException, InterruptedException {
+    appSubmitterUgi.doAs(new PrivilegedExceptionAction<Void>() {
+      @Override
+      public Void run() throws IOException {
+        FileSystem fs = renamedScriptPath.getFileSystem(conf);
+        fs.rename(new Path(scriptPath), renamedScriptPath);
+        return null;
+      }
+    });
+    LOG.info("User " + appSubmitterUgi.getUserName()
+        + " added suffix(.sh/.bat) to script file as " + renamedScriptPath);
   }
 
   /**
@@ -948,5 +1052,55 @@ public class ApplicationMaster {
     } finally {
       org.apache.commons.io.IOUtils.closeQuietly(ds);
     }
+  }
+  
+  private static void publishContainerStartEvent(TimelineClient timelineClient,
+      Container container) throws IOException, YarnException {
+    TimelineEntity entity = new TimelineEntity();
+    entity.setEntityId(container.getId().toString());
+    entity.setEntityType(DSEntity.DS_CONTAINER.toString());
+    entity.addPrimaryFilter("user", UserGroupInformation.getCurrentUser()
+        .toString());
+    TimelineEvent event = new TimelineEvent();
+    event.setTimestamp(System.currentTimeMillis());
+    event.setEventType(DSEvent.DS_CONTAINER_START.toString());
+    event.addEventInfo("Node", container.getNodeId().toString());
+    event.addEventInfo("Resources", container.getResource().toString());
+    entity.addEvent(event);
+
+    timelineClient.putEntities(entity);
+  }
+
+  private static void publishContainerEndEvent(TimelineClient timelineClient,
+      ContainerStatus container) throws IOException, YarnException {
+    TimelineEntity entity = new TimelineEntity();
+    entity.setEntityId(container.getContainerId().toString());
+    entity.setEntityType(DSEntity.DS_CONTAINER.toString());
+    entity.addPrimaryFilter("user", UserGroupInformation.getCurrentUser()
+        .toString());
+    TimelineEvent event = new TimelineEvent();
+    event.setTimestamp(System.currentTimeMillis());
+    event.setEventType(DSEvent.DS_CONTAINER_END.toString());
+    event.addEventInfo("State", container.getState().name());
+    event.addEventInfo("Exit Status", container.getExitStatus());
+    entity.addEvent(event);
+
+    timelineClient.putEntities(entity);
+  }
+
+  private static void publishApplicationAttemptEvent(
+      TimelineClient timelineClient, String appAttemptId, DSEvent appEvent)
+      throws IOException, YarnException {
+    TimelineEntity entity = new TimelineEntity();
+    entity.setEntityId(appAttemptId);
+    entity.setEntityType(DSEntity.DS_APP_ATTEMPT.toString());
+    entity.addPrimaryFilter("user", UserGroupInformation.getCurrentUser()
+        .toString());
+    TimelineEvent event = new TimelineEvent();
+    event.setEventType(appEvent.toString());
+    event.setTimestamp(System.currentTimeMillis());
+    entity.addEvent(event);
+
+    timelineClient.putEntities(entity);
   }
 }

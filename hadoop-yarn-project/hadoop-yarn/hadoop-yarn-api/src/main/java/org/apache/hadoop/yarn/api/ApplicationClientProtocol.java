@@ -24,8 +24,13 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.io.retry.Idempotent;
 import org.apache.hadoop.yarn.api.protocolrecords.CancelDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.CancelDelegationTokenResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
@@ -34,6 +39,10 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetContainersResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationRequest;
@@ -50,15 +59,21 @@ import org.apache.hadoop.yarn.api.protocolrecords.RenewDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RenewDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationResponse;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
+import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
+import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 
 /**
  * <p>The protocol between clients and the <code>ResourceManager</code>
@@ -89,6 +104,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetNewApplicationResponse getNewApplication(
       GetNewApplicationRequest request)
   throws YarnException, IOException;
@@ -107,8 +123,21 @@ public interface ApplicationClientProtocol {
    * {@link SubmitApplicationResponse} on accepting the submission and throws 
    * an exception if it rejects the submission. However, this call needs to be
    * followed by {@link #getApplicationReport(GetApplicationReportRequest)}
-   * to make sure that the application gets properly submitted.</p>
+   * to make sure that the application gets properly submitted - obtaining a
+   * {@link SubmitApplicationResponse} from ResourceManager doesn't guarantee
+   * that RM 'remembers' this application beyond failover or restart. If RM
+   * failover or RM restart happens before ResourceManager saves the
+   * application's state successfully, the subsequent
+   * {@link #getApplicationReport(GetApplicationReportRequest)} will throw
+   * a {@link ApplicationNotFoundException}. The Clients need to re-submit
+   * the application with the same {@link ApplicationSubmissionContext} when
+   * it encounters the {@link ApplicationNotFoundException} on the
+   * {@link #getApplicationReport(GetApplicationReportRequest)} call.</p>
    * 
+   * <p>During the submission process, it checks whether the application
+   * already exists. If the application exists, it will simply return
+   * SubmitApplicationResponse</p>
+   *
    * <p> In secure mode,the <code>ResourceManager</code> verifies access to
    * queues etc. before accepting the application submission.</p>
    * 
@@ -123,6 +152,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public SubmitApplicationResponse submitApplication(
       SubmitApplicationRequest request) 
   throws YarnException, IOException;
@@ -149,6 +179,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public KillApplicationResponse forceKillApplication(
       KillApplicationRequest request) 
   throws YarnException, IOException;
@@ -186,6 +217,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetApplicationReportResponse getApplicationReport(
       GetApplicationReportRequest request) 
   throws YarnException, IOException;
@@ -206,6 +238,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetClusterMetricsResponse getClusterMetrics(
       GetClusterMetricsRequest request) 
   throws YarnException, IOException;
@@ -233,6 +266,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetApplicationsResponse getApplications(
       GetApplicationsRequest request)
   throws YarnException, IOException;
@@ -252,6 +286,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetClusterNodesResponse getClusterNodes(
       GetClusterNodesRequest request) 
   throws YarnException, IOException;
@@ -273,6 +308,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetQueueInfoResponse getQueueInfo(
       GetQueueInfoRequest request) 
   throws YarnException, IOException;
@@ -292,6 +328,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+ @Idempotent
   public GetQueueUserAclsInfoResponse getQueueUserAcls(
       GetQueueUserAclsInfoRequest request) 
   throws YarnException, IOException;
@@ -310,6 +347,7 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Stable
+  @Idempotent
   public GetDelegationTokenResponse getDelegationToken(
       GetDelegationTokenRequest request) 
   throws YarnException, IOException;
@@ -324,6 +362,7 @@ public interface ApplicationClientProtocol {
    */
   @Private
   @Unstable
+  @Idempotent
   public RenewDelegationTokenResponse renewDelegationToken(
       RenewDelegationTokenRequest request) throws YarnException,
       IOException;
@@ -338,6 +377,7 @@ public interface ApplicationClientProtocol {
    */
   @Private
   @Unstable
+  @Idempotent
   public CancelDelegationTokenResponse cancelDelegationToken(
       CancelDelegationTokenRequest request) throws YarnException,
       IOException;
@@ -352,6 +392,155 @@ public interface ApplicationClientProtocol {
    */
   @Public
   @Unstable
+  @Idempotent
   public MoveApplicationAcrossQueuesResponse moveApplicationAcrossQueues(
       MoveApplicationAcrossQueuesRequest request) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to get a report of an Application Attempt
+   * from the <code>ResourceManager</code> 
+   * </p>
+   * 
+   * <p>
+   * The client, via {@link GetApplicationAttemptReportRequest} provides the
+   * {@link ApplicationAttemptId} of the application attempt.
+   * </p>
+   * 
+   * <p>
+   * In secure mode,the <code>ResourceManager</code> verifies access to
+   * the method before accepting the request.
+   * </p>
+   * 
+   * <p>
+   * The <code>ResourceManager</code> responds with a
+   * {@link GetApplicationAttemptReportResponse} which includes the
+   * {@link ApplicationAttemptReport} for the application attempt.
+   * </p>
+   * 
+   * <p>
+   * If the user does not have <code>VIEW_APP</code> access then the following
+   * fields in the report will be set to stubbed values:
+   * <ul>
+   * <li>host</li>
+   * <li>RPC port</li>
+   * <li>client token</li>
+   * <li>diagnostics - set to "N/A"</li>
+   * <li>tracking URL</li>
+   * </ul>
+   * </p>
+   * 
+   * @param request
+   *          request for an application attempt report
+   * @return application attempt report
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  @Idempotent
+  public GetApplicationAttemptReportResponse getApplicationAttemptReport(
+      GetApplicationAttemptReportRequest request) throws YarnException,
+      IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to get a report of all Application attempts
+   * in the cluster from the <code>ResourceManager</code>
+   * </p>
+   * 
+   * <p>
+   * The <code>ResourceManager</code> responds with a
+   * {@link GetApplicationAttemptsRequest} which includes the
+   * {@link ApplicationAttemptReport} for all the applications attempts of a
+   * specified application attempt.
+   * </p>
+   * 
+   * <p>
+   * If the user does not have <code>VIEW_APP</code> access for an application
+   * then the corresponding report will be filtered as described in
+   * {@link #getApplicationAttemptReport(GetApplicationAttemptReportRequest)}.
+   * </p>
+   * 
+   * @param request
+   *          request for reports on all application attempts of an application
+   * @return reports on all application attempts of an application
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  @Idempotent
+  public GetApplicationAttemptsResponse getApplicationAttempts(
+      GetApplicationAttemptsRequest request) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to get a report of an Container from the
+   * <code>ResourceManager</code>
+   * </p>
+   * 
+   * <p>
+   * The client, via {@link GetContainerReportRequest} provides the
+   * {@link ContainerId} of the container.
+   * </p>
+   * 
+   * <p>
+   * In secure mode,the <code>ResourceManager</code> verifies access to the
+   * method before accepting the request.
+   * </p>
+   * 
+   * <p>
+   * The <code>ResourceManager</code> responds with a
+   * {@link GetContainerReportResponse} which includes the
+   * {@link ContainerReport} for the container.
+   * </p>
+   * 
+   * @param request
+   *          request for a container report
+   * @return container report
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  @Idempotent
+  public GetContainerReportResponse getContainerReport(
+      GetContainerReportRequest request) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to get a report of Containers for an
+   * application attempt from the <code>ResourceManager</code>
+   * </p>
+   * 
+   * <p>
+   * The client, via {@link GetContainersRequest} provides the
+   * {@link ApplicationAttemptId} of the application attempt.
+   * </p>
+   * 
+   * <p>
+   * In secure mode,the <code>ResourceManager</code> verifies access to the
+   * method before accepting the request.
+   * </p>
+   * 
+   * <p>
+   * The <code>ResourceManager</code> responds with a
+   * {@link GetContainersResponse} which includes a list of
+   * {@link ContainerReport} for all the containers of a specific application
+   * attempt.
+   * </p>
+   * 
+   * @param request
+   *          request for a list of container reports of an application attempt.
+   * @return reports on all containers of an application attempt
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  @Idempotent
+  public GetContainersResponse getContainers(GetContainersRequest request)
+      throws YarnException, IOException;
+
 }

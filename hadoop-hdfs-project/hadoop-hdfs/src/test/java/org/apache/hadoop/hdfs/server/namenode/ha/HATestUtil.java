@@ -49,7 +49,7 @@ import com.google.common.base.Supplier;
  * Static utility functions useful for testing HA.
  */
 public abstract class HATestUtil {
-  private static Log LOG = LogFactory.getLog(HATestUtil.class);
+  private static final Log LOG = LogFactory.getLog(HATestUtil.class);
   
   private static final String LOGICAL_HOSTNAME = "ha-nn-uri-%d";
   
@@ -111,7 +111,7 @@ public abstract class HATestUtil {
    * Wait for the NameNode to issue any deletions that are already
    * pending (i.e. for the pendingDeletionBlocksCount to go to 0)
    */
-  static void waitForNNToIssueDeletions(final NameNode nn)
+  public static void waitForNNToIssueDeletions(final NameNode nn)
       throws Exception {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       @Override

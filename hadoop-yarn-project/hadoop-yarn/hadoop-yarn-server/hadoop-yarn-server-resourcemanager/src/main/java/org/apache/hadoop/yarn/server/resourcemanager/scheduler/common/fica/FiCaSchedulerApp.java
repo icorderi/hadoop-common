@@ -192,7 +192,7 @@ public class FiCaSchedulerApp extends SchedulerApplicationAttempt {
     return Math.min(((float)requiredResources / clusterNodes), 1.0f);
   }
 
-  public Resource getTotalPendingRequests() {
+  public synchronized Resource getTotalPendingRequests() {
     Resource ret = Resource.newInstance(0, 0);
     for (ResourceRequest rr : appSchedulingInfo.getAllResourceRequests()) {
       // to avoid double counting we count only "ANY" resource requests
@@ -237,9 +237,11 @@ public class FiCaSchedulerApp extends SchedulerApplicationAttempt {
     ResourceRequest rr = ResourceRequest.newInstance(
         Priority.UNDEFINED, ResourceRequest.ANY,
         minimumAllocation, numCont);
-    return new Allocation(pullNewlyAllocatedContainers(), getHeadroom(),
-                          null, currentContPreemption,
-                          Collections.singletonList(rr));
+    ContainersAndNMTokensAllocation allocation =
+        pullNewlyAllocatedContainersAndNMTokens();
+    return new Allocation(allocation.getContainerList(), getHeadroom(), null,
+      currentContPreemption, Collections.singletonList(rr),
+      allocation.getNMTokenList());
   }
 
 }

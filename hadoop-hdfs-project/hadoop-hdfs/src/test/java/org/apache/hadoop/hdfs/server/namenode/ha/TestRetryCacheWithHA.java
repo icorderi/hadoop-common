@@ -92,7 +92,7 @@ public class TestRetryCacheWithHA {
   
   private MiniDFSCluster cluster;
   private DistributedFileSystem dfs;
-  private Configuration conf = new HdfsConfiguration();
+  private final Configuration conf = new HdfsConfiguration();
   
   /** 
    * A dummy invocation handler extending RetryInvocationHandler. We can use
@@ -100,7 +100,7 @@ public class TestRetryCacheWithHA {
    */
   private static class DummyRetryInvocationHandler extends
       RetryInvocationHandler<ClientProtocol> {
-    static AtomicBoolean block = new AtomicBoolean(false);
+    static final AtomicBoolean block = new AtomicBoolean(false);
 
     DummyRetryInvocationHandler(
         FailoverProxyProvider<ClientProtocol> proxyProvider,
@@ -125,6 +125,7 @@ public class TestRetryCacheWithHA {
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BlockSize);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_LIST_CACHE_DIRECTIVES_NUM_RESPONSES, ResponseSize);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_LIST_CACHE_POOLS_NUM_RESPONSES, ResponseSize);
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
     cluster = new MiniDFSCluster.Builder(conf)
         .nnTopology(MiniDFSNNTopology.simpleHATopology())
         .numDataNodes(DataNodes).build();
@@ -225,8 +226,8 @@ public class TestRetryCacheWithHA {
   /** createSnapshot operaiton */
   class CreateSnapshotOp extends AtMostOnceOp {
     private String snapshotPath;
-    private String dir;
-    private String snapshotName;
+    private final String dir;
+    private final String snapshotName;
     
     CreateSnapshotOp(DFSClient client, String dir, String snapshotName) {
       super("createSnapshot", client);
@@ -268,8 +269,8 @@ public class TestRetryCacheWithHA {
   
   /** deleteSnapshot */
   class DeleteSnapshotOp extends AtMostOnceOp {
-    private String dir;
-    private String snapshotName;
+    private final String dir;
+    private final String snapshotName;
     
     DeleteSnapshotOp(DFSClient client, String dir, String snapshotName) {
       super("deleteSnapshot", client);
@@ -316,9 +317,9 @@ public class TestRetryCacheWithHA {
   
   /** renameSnapshot */
   class RenameSnapshotOp extends AtMostOnceOp {
-    private String dir;
-    private String oldName;
-    private String newName;
+    private final String dir;
+    private final String oldName;
+    private final String newName;
     
     RenameSnapshotOp(DFSClient client, String dir, String oldName,
         String newName) {
@@ -367,7 +368,7 @@ public class TestRetryCacheWithHA {
   
   /** create file operation (without OverWrite) */
   class CreateOp extends AtMostOnceOp {
-    private String fileName;
+    private final String fileName;
     private HdfsFileStatus status;
     
     CreateOp(DFSClient client, String fileName) {
@@ -415,7 +416,7 @@ public class TestRetryCacheWithHA {
   
   /** append operation */
   class AppendOp extends AtMostOnceOp {
-    private String fileName;
+    private final String fileName;
     private LocatedBlock lbk;
     
     AppendOp(DFSClient client, String fileName) {
@@ -459,8 +460,8 @@ public class TestRetryCacheWithHA {
   
   /** rename */
   class RenameOp extends AtMostOnceOp {
-    private String oldName;
-    private String newName;
+    private final String oldName;
+    private final String newName;
     private boolean renamed;
     
     RenameOp(DFSClient client, String oldName, String newName) {
@@ -502,8 +503,8 @@ public class TestRetryCacheWithHA {
   
   /** rename2 */
   class Rename2Op extends AtMostOnceOp {
-    private String oldName;
-    private String newName;
+    private final String oldName;
+    private final String newName;
     
     Rename2Op(DFSClient client, String oldName, String newName) {
       super("rename2", client);
@@ -543,9 +544,9 @@ public class TestRetryCacheWithHA {
   
   /** concat */
   class ConcatOp extends AtMostOnceOp {
-    private String target;
-    private String[] srcs;
-    private Path[] srcPaths;
+    private final String target;
+    private final String[] srcs;
+    private final Path[] srcPaths;
     
     ConcatOp(DFSClient client, Path target, int numSrc) {
       super("concat", client);
@@ -561,10 +562,12 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
-      DFSTestUtil.createFile(dfs, new Path(target), BlockSize, DataNodes, 0);
+      final Path targetPath = new Path(target);
+      DFSTestUtil.createFile(dfs, targetPath, BlockSize, DataNodes, 0);
       for (int i = 0; i < srcPaths.length; i++) {
         DFSTestUtil.createFile(dfs, srcPaths[i], BlockSize, DataNodes, 0);
       }
+      assertEquals(BlockSize, dfs.getFileStatus(targetPath).getLen());
     }
 
     @Override
@@ -575,10 +578,12 @@ public class TestRetryCacheWithHA {
     @Override
     boolean checkNamenodeBeforeReturn() throws Exception {
       Path targetPath = new Path(target);
-      boolean done = dfs.exists(targetPath);
+      boolean done = dfs.getFileStatus(targetPath).getLen() == BlockSize
+          * (srcs.length + 1);
       for (int i = 0; i < CHECKTIMES && !done; i++) {
         Thread.sleep(1000);
-        done = dfs.exists(targetPath);
+        done = dfs.getFileStatus(targetPath).getLen() == BlockSize
+            * (srcs.length + 1);
       }
       return done;
     }
@@ -591,7 +596,7 @@ public class TestRetryCacheWithHA {
   
   /** delete */
   class DeleteOp extends AtMostOnceOp {
-    private String target;
+    private final String target;
     private boolean deleted;
     
     DeleteOp(DFSClient client, String target) {
@@ -631,8 +636,8 @@ public class TestRetryCacheWithHA {
   
   /** createSymlink */
   class CreateSymlinkOp extends AtMostOnceOp {
-    private String target;
-    private String link;
+    private final String target;
+    private final String link;
     
     public CreateSymlinkOp(DFSClient client, String target, String link) {
       super("createSymlink", client);
@@ -676,7 +681,7 @@ public class TestRetryCacheWithHA {
   
   /** updatePipeline */
   class UpdatePipelineOp extends AtMostOnceOp {
-    private String file;
+    private final String file;
     private ExtendedBlock oldBlock;
     private ExtendedBlock newBlock;
     private DatanodeInfo[] nodes;
@@ -745,7 +750,7 @@ public class TestRetryCacheWithHA {
   
   /** addCacheDirective */
   class AddCacheDirectiveInfoOp extends AtMostOnceOp {
-    private CacheDirectiveInfo directive;
+    private final CacheDirectiveInfo directive;
     private Long result;
 
     AddCacheDirectiveInfoOp(DFSClient client,
@@ -844,7 +849,7 @@ public class TestRetryCacheWithHA {
 
   /** removeCacheDirective */
   class RemoveCacheDirectiveInfoOp extends AtMostOnceOp {
-    private CacheDirectiveInfo directive;
+    private final CacheDirectiveInfo directive;
     private long id;
 
     RemoveCacheDirectiveInfoOp(DFSClient client, String pool,
@@ -892,7 +897,7 @@ public class TestRetryCacheWithHA {
 
   /** addCachePool */
   class AddCachePoolOp extends AtMostOnceOp {
-    private String pool;
+    private final String pool;
 
     AddCachePoolOp(DFSClient client, String pool) {
       super("addCachePool", client);
@@ -928,7 +933,7 @@ public class TestRetryCacheWithHA {
 
   /** modifyCachePool */
   class ModifyCachePoolOp extends AtMostOnceOp {
-    String pool;
+    final String pool;
 
     ModifyCachePoolOp(DFSClient client, String pool) {
       super("modifyCachePool", client);
@@ -949,7 +954,7 @@ public class TestRetryCacheWithHA {
     boolean checkNamenodeBeforeReturn() throws Exception {
       for (int i = 0; i < CHECKTIMES; i++) {
         RemoteIterator<CachePoolEntry> iter = dfs.listCachePools();
-        if (iter.hasNext() && (long)iter.next().getInfo().getLimit() == 99) {
+        if (iter.hasNext() && iter.next().getInfo().getLimit() == 99) {
           return true;
         }
         Thread.sleep(1000);
@@ -965,7 +970,7 @@ public class TestRetryCacheWithHA {
 
   /** removeCachePool */
   class RemoveCachePoolOp extends AtMostOnceOp {
-    private String pool;
+    private final String pool;
 
     RemoveCachePoolOp(DFSClient client, String pool) {
       super("removeCachePool", client);
@@ -1180,6 +1185,26 @@ public class TestRetryCacheWithHA {
       LOG.info("Got the result of " + op.name + ": "
           + results.get(op.name));
     }
+
+    // Waiting for failover.
+    while (cluster.getNamesystem(1).isInStandbyState()) {
+      Thread.sleep(10);
+    }
+
+    long hitNN0 = cluster.getNamesystem(0).getRetryCache().getMetricsForTests()
+        .getCacheHit();
+    long hitNN1 = cluster.getNamesystem(1).getRetryCache().getMetricsForTests()
+        .getCacheHit();
+    assertTrue("CacheHit: " + hitNN0 + ", " + hitNN1,
+        hitNN0 + hitNN1 > 0);
+    long updatedNN0 = cluster.getNamesystem(0).getRetryCache()
+        .getMetricsForTests().getCacheUpdated();
+    long updatedNN1 = cluster.getNamesystem(1).getRetryCache()
+        .getMetricsForTests().getCacheUpdated();
+    // Cache updated metrics on NN0 should be >0 since the op was process on NN0
+    assertTrue("CacheUpdated on NN0: " + updatedNN0, updatedNN0 > 0);
+    // Cache updated metrics on NN0 should be >0 since NN1 applied the editlog
+    assertTrue("CacheUpdated on NN1: " + updatedNN1, updatedNN1 > 0);
   }
 
   /**

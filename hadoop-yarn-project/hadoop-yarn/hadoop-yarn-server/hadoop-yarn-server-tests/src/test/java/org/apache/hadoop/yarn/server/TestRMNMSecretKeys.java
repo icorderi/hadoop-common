@@ -20,7 +20,7 @@ package org.apache.hadoop.yarn.server;
 
 import java.io.IOException;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -109,8 +109,8 @@ public class TestRMNMSecretKeys {
     dispatcher.await();
 
     // Let's force a roll-over
-    rm.getRMContainerTokenSecretManager().rollMasterKey();
-    rm.getRMNMTokenSecretManager().rollMasterKey();
+    rm.getRMContext().getContainerTokenSecretManager().rollMasterKey();
+    rm.getRMContext().getNMTokenSecretManager().rollMasterKey();
 
     // Heartbeats after roll-over and before activation should be fine.
     response = nm.nodeHeartbeat(true);
@@ -141,8 +141,8 @@ public class TestRMNMSecretKeys {
     dispatcher.await();
 
     // Let's force activation
-    rm.getRMContainerTokenSecretManager().activateNextMasterKey();
-    rm.getRMNMTokenSecretManager().activateNextMasterKey();
+    rm.getRMContext().getContainerTokenSecretManager().activateNextMasterKey();
+    rm.getRMContext().getNMTokenSecretManager().activateNextMasterKey();
 
     response = nm.nodeHeartbeat(true);
     Assert.assertNull(containerToken

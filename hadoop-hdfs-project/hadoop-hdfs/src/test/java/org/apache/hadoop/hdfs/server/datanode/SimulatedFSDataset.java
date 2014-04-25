@@ -34,6 +34,7 @@ import javax.management.StandardMBean;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
@@ -96,6 +97,11 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
   public static final long DEFAULT_CAPACITY = 2L<<40; // 1 terabyte
   public static final byte DEFAULT_DATABYTE = 9;
   
+  public static final String CONFIG_PROPERTY_STATE =
+      "dfs.datanode.simulateddatastorage.state";
+  private static final DatanodeStorage.State DEFAULT_STATE =
+      DatanodeStorage.State.NORMAL;
+  
   static final byte[] nullCrcFileData;
   static {
     DataChecksum checksum = DataChecksum.newDataChecksum(
@@ -111,7 +117,7 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
 
   // information about a single block
   private class BInfo implements ReplicaInPipelineInterface {
-    Block theBlock;
+    final Block theBlock;
     private boolean finalized = false; // if not finalized => ongoing creation
     SimulatedOutputStream oStream = null;
     private long bytesAcked;
@@ -323,11 +329,11 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
    * to {@link FSVolumeSet}
    */
   private static class SimulatedStorage {
-    private Map<String, SimulatedBPStorage> map = 
+    private final Map<String, SimulatedBPStorage> map =
       new HashMap<String, SimulatedBPStorage>();
-    private final String storageUuid = "SimulatedStroage-" + DatanodeStorage.generateUuid();
 
     private final long capacity;  // in bytes
+    private final DatanodeStorage dnStorage;
     
     synchronized long getFree() {
       return capacity - getUsed();
@@ -365,8 +371,11 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
       getBPStorage(bpid).free(amount);
     }
     
-    SimulatedStorage(long cap) {
+    SimulatedStorage(long cap, DatanodeStorage.State state) {
       capacity = cap;
+      dnStorage = new DatanodeStorage(
+          "SimulatedStorage-" + DatanodeStorage.generateUuid(),
+          state, StorageType.DEFAULT);
     }
     
     synchronized void addBlockPool(String bpid) {
@@ -390,11 +399,15 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
     }
 
     String getStorageUuid() {
-      return storageUuid;
+      return dnStorage.getStorageID();
+    }
+    
+    DatanodeStorage getDnStorage() {
+      return dnStorage;
     }
 
     synchronized StorageReport getStorageReport(String bpid) {
-      return new StorageReport(new DatanodeStorage(getStorageUuid()),
+      return new StorageReport(dnStorage,
           false, getCapacity(), getUsed(), getFree(),
           map.get(bpid).getUsed());
     }
@@ -417,7 +430,8 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
 
     registerMBean(datanodeUuid);
     this.storage = new SimulatedStorage(
-        conf.getLong(CONFIG_PROPERTY_CAPACITY, DEFAULT_CAPACITY));
+        conf.getLong(CONFIG_PROPERTY_CAPACITY, DEFAULT_CAPACITY),
+        conf.getEnum(CONFIG_PROPERTY_STATE, DEFAULT_STATE));
   }
 
   public synchronized void injectBlocks(String bpid,
@@ -488,7 +502,7 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
   @Override
   public synchronized Map<DatanodeStorage, BlockListAsLongs> getBlockReports(
       String bpid) {
-    return Collections.singletonMap(new DatanodeStorage(storage.storageUuid), getBlockReport(bpid));
+    return Collections.singletonMap(storage.getDnStorage(), getBlockReport(bpid));
   }
 
   @Override // FsDatasetSpi
@@ -625,6 +639,11 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
   public void uncache(String bpid, long[] uncacheBlks) {
     throw new UnsupportedOperationException(
         "SimulatedFSDataset does not support uncache operation!");
+  }
+
+  @Override // FSDatasetSpi
+  public boolean isCached(String bpid, long blockId) {
+    return false;
   }
 
   private BInfo getBInfo(final ExtendedBlock b) {
@@ -808,14 +827,14 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
     
 
     byte theRepeatedData = 7;
-    long length; // bytes
+    final long length; // bytes
     int currentPos = 0;
     byte[] data = null;
     
     /**
      * An input stream of size l with repeated bytes
-     * @param l
-     * @param iRepeatedData
+     * @param l size of the stream
+     * @param iRepeatedData byte that is repeated in the stream
      */
     SimulatedInputStream(long l, byte iRepeatedData) {
       length = l;
@@ -824,17 +843,14 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
     
     /**
      * An input stream of of the supplied data
-     * 
-     * @param iData
+     * @param iData data to construct the stream
      */
     SimulatedInputStream(byte[] iData) {
       data = iData;
       length = data.length;
-      
     }
     
     /**
-     * 
      * @return the lenght of the input stream
      */
     long getLength() {
@@ -1035,9 +1051,23 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
   }
 
   @Override
-  public HdfsBlocksMetadata getHdfsBlocksMetadata(List<ExtendedBlock> blocks)
+  public HdfsBlocksMetadata getHdfsBlocksMetadata(String bpid, long[] blockIds)
       throws IOException {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void enableTrash(String bpid) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void restoreTrash(String bpid) {
+  }
+
+  @Override
+  public boolean trashEnabled(String bpid) {
+    return false;
   }
 
   @Override
@@ -1049,6 +1079,13 @@ public class SimulatedFSDataset implements FsDatasetSpi<FsVolumeSpi> {
   @Override
   public List<FsVolumeSpi> getVolumes() {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public DatanodeStorage getStorage(final String storageUuid) {
+    return storageUuid.equals(storage.getStorageUuid()) ?
+        storage.dnStorage :
+        null;
   }
 
   @Override

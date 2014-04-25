@@ -50,7 +50,7 @@ import com.google.protobuf.BlockingService;
 class JournalNodeRpcServer implements QJournalProtocol {
 
   private static final int HANDLER_COUNT = 5;
-  private JournalNode jn;
+  private final JournalNode jn;
   private Server server;
 
   JournalNodeRpcServer(Configuration conf, JournalNode jn) throws IOException {
@@ -156,10 +156,10 @@ class JournalNodeRpcServer implements QJournalProtocol {
   }
 
   @Override
-  public void startLogSegment(RequestInfo reqInfo, long txid)
+  public void startLogSegment(RequestInfo reqInfo, long txid, int layoutVersion)
       throws IOException {
     jn.getOrCreateJournal(reqInfo.getJournalId())
-      .startLogSegment(reqInfo, txid);
+      .startLogSegment(reqInfo, txid, layoutVersion);
   }
 
   @Override
@@ -231,6 +231,12 @@ class JournalNodeRpcServer implements QJournalProtocol {
   @Override
   public void doRollback(String journalId) throws IOException {
     jn.doRollback(journalId);
+  }
+
+  @Override
+  public void discardSegments(String journalId, long startTxId)
+      throws IOException {
+    jn.discardSegments(journalId, startTxId);
   }
 
   @Override

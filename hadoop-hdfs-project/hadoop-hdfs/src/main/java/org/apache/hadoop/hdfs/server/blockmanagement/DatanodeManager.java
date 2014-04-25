@@ -34,10 +34,6 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.BlockTargetPair;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.CachedBlocksList;
 import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
-import org.apache.hadoop.hdfs.server.namenode.HostFileManager;
-import org.apache.hadoop.hdfs.server.namenode.HostFileManager.Entry;
-import org.apache.hadoop.hdfs.server.namenode.HostFileManager.EntrySet;
-import org.apache.hadoop.hdfs.server.namenode.HostFileManager.MutableEntrySet;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.server.protocol.*;
@@ -53,6 +49,7 @@ import org.apache.hadoop.util.Time;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.*;
 
@@ -98,6 +95,7 @@ public class DatanodeManager {
   private final Host2NodesMap host2DatanodeMap = new Host2NodesMap();
 
   private final DNSToSwitchMapping dnsToSwitchMapping;
+  private final boolean rejectUnresolvedTopologyDN;
 
   private final int defaultXferPort;
   
@@ -201,18 +199,20 @@ public class DatanodeManager {
         conf.getClass(DFSConfigKeys.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY, 
             ScriptBasedMapping.class, DNSToSwitchMapping.class), conf);
     
+    this.rejectUnresolvedTopologyDN = conf.getBoolean(
+        DFSConfigKeys.DFS_REJECT_UNRESOLVED_DN_TOPOLOGY_MAPPING_KEY,
+        DFSConfigKeys.DFS_REJECT_UNRESOLVED_DN_TOPOLOGY_MAPPING_DEFAULT);
+    
     // If the dns to switch mapping supports cache, resolve network
     // locations of those hosts in the include list and store the mapping
     // in the cache; so future calls to resolve will be fast.
     if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
       final ArrayList<String> locations = new ArrayList<String>();
-      for (Entry entry : hostFileManager.getIncludes()) {
-        if (!entry.getIpAddress().isEmpty()) {
-          locations.add(entry.getIpAddress());
-        }
+      for (InetSocketAddress addr : hostFileManager.getIncludes()) {
+        locations.add(addr.getAddress().getHostAddress());
       }
       dnsToSwitchMapping.resolve(locations);
-    };
+    }
 
     final long heartbeatIntervalSeconds = conf.getLong(
         DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
@@ -391,7 +391,8 @@ public class DatanodeManager {
       node = getDatanodeByHost(host);
     }
     if (node == null) {
-      String networkLocation = resolveNetworkLocation(dnId);
+      String networkLocation = 
+          resolveNetworkLocationWithFallBackToDefaultLocation(dnId);
 
       // If the current cluster doesn't contain the node, fallback to
       // something machine local and then rack local.
@@ -434,9 +435,9 @@ public class DatanodeManager {
   }
 
   /**
-   * Get data node by storage ID.
+   * Get data node by datanode ID.
    * 
-   * @param nodeID
+   * @param nodeID datanode ID
    * @return DatanodeDescriptor or null if the node is not found.
    * @throws UnregisteredNodeException
    */
@@ -626,9 +627,36 @@ public class DatanodeManager {
       return new HashMap<String, Integer> (this.datanodesSoftwareVersions);
     }
   }
-
-  /* Resolve a node's network location */
-  private String resolveNetworkLocation (DatanodeID node) {
+  
+  /**
+   *  Resolve a node's network location. If the DNS to switch mapping fails 
+   *  then this method guarantees default rack location. 
+   *  @param node to resolve to network location
+   *  @return network location path
+   */
+  private String resolveNetworkLocationWithFallBackToDefaultLocation (
+      DatanodeID node) {
+    String networkLocation;
+    try {
+      networkLocation = resolveNetworkLocation(node);
+    } catch (UnresolvedTopologyException e) {
+      LOG.error("Unresolved topology mapping. Using " +
+          NetworkTopology.DEFAULT_RACK + " for host " + node.getHostName());
+      networkLocation = NetworkTopology.DEFAULT_RACK;
+    }
+    return networkLocation;
+  }
+  
+  /**
+   * Resolve a node's network location. If the DNS to switch mapping fails, 
+   * then this method throws UnresolvedTopologyException. 
+   * @param node to resolve to network location
+   * @return network location path.
+   * @throws UnresolvedTopologyException if the DNS to switch mapping fails 
+   *    to resolve network location.
+   */
+  private String resolveNetworkLocation (DatanodeID node) 
+      throws UnresolvedTopologyException {
     List<String> names = new ArrayList<String>(1);
     if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
       names.add(node.getIpAddr());
@@ -640,9 +668,9 @@ public class DatanodeManager {
     List<String> rName = dnsToSwitchMapping.resolve(names);
     String networkLocation;
     if (rName == null) {
-      LOG.error("The resolve call returned null! Using " + 
-          NetworkTopology.DEFAULT_RACK + " for host " + names);
-      networkLocation = NetworkTopology.DEFAULT_RACK;
+      LOG.error("The resolve call returned null!");
+        throw new UnresolvedTopologyException(
+            "Unresolved topology mapping for host " + node.getHostName());
     } else {
       networkLocation = rName.get(0);
     }
@@ -711,7 +739,7 @@ public class DatanodeManager {
   boolean checkDecommissionState(DatanodeDescriptor node) {
     // Check to see if all blocks in this decommissioned
     // node has reached their target replication factor.
-    if (node.isDecommissionInProgress()) {
+    if (node.isDecommissionInProgress() && node.checkBlockReportReceived()) {
       if (!blockManager.isReplicationInProgress(node)) {
         node.setDecommissioned();
         LOG.info("Decommission complete for " + node);
@@ -755,9 +783,11 @@ public class DatanodeManager {
    * @param nodeReg the datanode registration
    * @throws DisallowedDatanodeException if the registration request is
    *    denied because the datanode does not match includes/excludes
+   * @throws UnresolvedTopologyException if the registration request is 
+   *    denied because resolving datanode network location fails.
    */
   public void registerDatanode(DatanodeRegistration nodeReg)
-      throws DisallowedDatanodeException {
+      throws DisallowedDatanodeException, UnresolvedTopologyException {
     InetAddress dnAddress = Server.getRemoteIp();
     if (dnAddress != null) {
       // Mostly called inside an RPC, update ip and peer hostname
@@ -839,7 +869,13 @@ public class DatanodeManager {
           nodeS.setDisallowed(false); // Node is in the include list
 
           // resolve network location
-          nodeS.setNetworkLocation(resolveNetworkLocation(nodeS));
+          if(this.rejectUnresolvedTopologyDN)
+          {
+            nodeS.setNetworkLocation(resolveNetworkLocation(nodeS));  
+          } else {
+            nodeS.setNetworkLocation(
+                resolveNetworkLocationWithFallBackToDefaultLocation(nodeS));
+          }
           getNetworkTopology().add(nodeS);
             
           // also treat the registration message as a heartbeat
@@ -861,7 +897,13 @@ public class DatanodeManager {
         = new DatanodeDescriptor(nodeReg, NetworkTopology.DEFAULT_RACK);
       boolean success = false;
       try {
-        nodeDescr.setNetworkLocation(resolveNetworkLocation(nodeDescr));
+        // resolve network location
+        if(this.rejectUnresolvedTopologyDN) {
+          nodeDescr.setNetworkLocation(resolveNetworkLocation(nodeDescr));
+        } else {
+          nodeDescr.setNetworkLocation(
+              resolveNetworkLocationWithFallBackToDefaultLocation(nodeDescr));
+        }
         networktopology.add(nodeDescr);
         nodeDescr.setSoftwareVersion(nodeReg.getSoftwareVersion());
   
@@ -972,21 +1014,18 @@ public class DatanodeManager {
 
   /** @return list of datanodes where decommissioning is in progress. */
   public List<DatanodeDescriptor> getDecommissioningNodes() {
-    namesystem.readLock();
-    try {
-      final List<DatanodeDescriptor> decommissioningNodes
-          = new ArrayList<DatanodeDescriptor>();
-      final List<DatanodeDescriptor> results = getDatanodeListForReport(
-          DatanodeReportType.LIVE);
-      for(DatanodeDescriptor node : results) {
-        if (node.isDecommissionInProgress()) {
-          decommissioningNodes.add(node);
-        }
+    // There is no need to take namesystem reader lock as
+    // getDatanodeListForReport will synchronize on datanodeMap
+    final List<DatanodeDescriptor> decommissioningNodes
+        = new ArrayList<DatanodeDescriptor>();
+    final List<DatanodeDescriptor> results = getDatanodeListForReport(
+        DatanodeReportType.LIVE);
+    for(DatanodeDescriptor node : results) {
+      if (node.isDecommissionInProgress()) {
+        decommissioningNodes.add(node);
       }
-      return decommissioningNodes;
-    } finally {
-      namesystem.readUnlock();
     }
+    return decommissioningNodes;
   }
   
   /* Getter and Setter for stale DataNodes related attributes */
@@ -1039,23 +1078,20 @@ public class DatanodeManager {
       throw new HadoopIllegalArgumentException("Both live and dead lists are null");
     }
 
-    namesystem.readLock();
-    try {
-      final List<DatanodeDescriptor> results =
-          getDatanodeListForReport(DatanodeReportType.ALL);    
-      for(DatanodeDescriptor node : results) {
-        if (isDatanodeDead(node)) {
-          if (dead != null) {
-            dead.add(node);
-          }
-        } else {
-          if (live != null) {
-            live.add(node);
-          }
+    // There is no need to take namesystem reader lock as
+    // getDatanodeListForReport will synchronize on datanodeMap
+    final List<DatanodeDescriptor> results =
+        getDatanodeListForReport(DatanodeReportType.ALL);
+    for(DatanodeDescriptor node : results) {
+      if (isDatanodeDead(node)) {
+        if (dead != null) {
+          dead.add(node);
+        }
+      } else {
+        if (live != null) {
+          live.add(node);
         }
       }
-    } finally {
-      namesystem.readUnlock();
     }
     
     if (removeDecommissionNode) {
@@ -1120,7 +1156,7 @@ public class DatanodeManager {
       port = DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT;
     } else {
       hostStr = hostLine.substring(0, idx);
-      port = Integer.valueOf(hostLine.substring(idx+1));
+      port = Integer.parseInt(hostLine.substring(idx+1));
     }
 
     if (InetAddresses.isInetAddress(hostStr)) {
@@ -1152,46 +1188,45 @@ public class DatanodeManager {
     boolean listDeadNodes = type == DatanodeReportType.ALL ||
                             type == DatanodeReportType.DEAD;
 
-    ArrayList<DatanodeDescriptor> nodes = null;
-    final MutableEntrySet foundNodes = new MutableEntrySet();
+    ArrayList<DatanodeDescriptor> nodes;
+    final HostFileManager.HostSet foundNodes = new HostFileManager.HostSet();
+    final HostFileManager.HostSet includedNodes = hostFileManager.getIncludes();
+    final HostFileManager.HostSet excludedNodes = hostFileManager.getExcludes();
+
     synchronized(datanodeMap) {
       nodes = new ArrayList<DatanodeDescriptor>(datanodeMap.size());
-      Iterator<DatanodeDescriptor> it = datanodeMap.values().iterator();
-      while (it.hasNext()) { 
-        DatanodeDescriptor dn = it.next();
+      for (DatanodeDescriptor dn : datanodeMap.values()) {
         final boolean isDead = isDatanodeDead(dn);
-        if ( (isDead && listDeadNodes) || (!isDead && listLiveNodes) ) {
-          nodes.add(dn);
+        if ((listLiveNodes && !isDead) || (listDeadNodes && isDead)) {
+            nodes.add(dn);
         }
-        foundNodes.add(dn);
+        foundNodes.add(HostFileManager.resolvedAddressFromDatanodeID(dn));
       }
     }
 
     if (listDeadNodes) {
-      final EntrySet includedNodes = hostFileManager.getIncludes();
-      final EntrySet excludedNodes = hostFileManager.getExcludes();
-      for (Entry entry : includedNodes) {
-        if ((foundNodes.find(entry) == null) &&
-            (excludedNodes.find(entry) == null)) {
-          // The remaining nodes are ones that are referenced by the hosts
-          // files but that we do not know about, ie that we have never
-          // head from. Eg. an entry that is no longer part of the cluster
-          // or a bogus entry was given in the hosts files
-          //
-          // If the host file entry specified the xferPort, we use that.
-          // Otherwise, we guess that it is the default xfer port.
-          // We can't ask the DataNode what it had configured, because it's
-          // dead.
-          DatanodeDescriptor dn =
-              new DatanodeDescriptor(new DatanodeID(entry.getIpAddress(),
-                  entry.getPrefix(), "",
-                  entry.getPort() == 0 ? defaultXferPort : entry.getPort(),
-                  defaultInfoPort, defaultInfoSecurePort, defaultIpcPort));
-          dn.setLastUpdate(0); // Consider this node dead for reporting
-          nodes.add(dn);
+      for (InetSocketAddress addr : includedNodes) {
+        if (foundNodes.matchedBy(addr) || excludedNodes.match(addr)) {
+          continue;
         }
+        // The remaining nodes are ones that are referenced by the hosts
+        // files but that we do not know about, ie that we have never
+        // head from. Eg. an entry that is no longer part of the cluster
+        // or a bogus entry was given in the hosts files
+        //
+        // If the host file entry specified the xferPort, we use that.
+        // Otherwise, we guess that it is the default xfer port.
+        // We can't ask the DataNode what it had configured, because it's
+        // dead.
+        DatanodeDescriptor dn = new DatanodeDescriptor(new DatanodeID(addr
+                .getAddress().getHostAddress(), addr.getHostName(), "",
+                addr.getPort() == 0 ? defaultXferPort : addr.getPort(),
+                defaultInfoPort, defaultInfoSecurePort, defaultIpcPort));
+        dn.setLastUpdate(0); // Consider this node dead for reporting
+        nodes.add(dn);
       }
     }
+
     if (LOG.isDebugEnabled()) {
       LOG.debug("getDatanodeListForReport with " +
           "includedNodes = " + hostFileManager.getIncludes() +

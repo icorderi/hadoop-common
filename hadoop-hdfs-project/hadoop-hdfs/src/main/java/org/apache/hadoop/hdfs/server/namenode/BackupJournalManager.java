@@ -56,7 +56,8 @@ class BackupJournalManager implements JournalManager {
 
   
   @Override
-  public EditLogOutputStream startLogSegment(long txId) throws IOException {
+  public EditLogOutputStream startLogSegment(long txId, int layoutVersion)
+      throws IOException {
     EditLogBackupOutputStream stm = new EditLogBackupOutputStream(bnReg,
         journalInfo);
     stm.startLogSegment(txId);
@@ -123,6 +124,11 @@ class BackupJournalManager implements JournalManager {
 
   @Override
   public void doRollback() throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void discardSegments(long startTxId) throws IOException {
     throw new UnsupportedOperationException();
   }
 

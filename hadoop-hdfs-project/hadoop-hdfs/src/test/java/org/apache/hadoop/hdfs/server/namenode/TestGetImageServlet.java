@@ -51,13 +51,13 @@ public class TestGetImageServlet {
     // Set up NN1 HA configs.
     conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY,
         "ns1", "nn1"), "host1:1234");
-    conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY,
+    conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY,
         "ns1", "nn1"), "hdfs/_HOST@TEST-REALM.COM");
     
     // Set up NN2 HA configs.
     conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY,
         "ns1", "nn2"), "host2:1234");
-    conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY,
+    conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY,
         "ns1", "nn2"), "hdfs/_HOST@TEST-REALM.COM");
     
     // Initialize this conf object as though we're running on NN1.
@@ -69,7 +69,7 @@ public class TestGetImageServlet {
     Mockito.when(context.getAttribute(HttpServer2.ADMINS_ACL)).thenReturn(acls);
     
     // Make sure that NN2 is considered a valid fsimage/edits requestor.
-    assertTrue(GetImageServlet.isValidRequestor(context,
+    assertTrue(ImageServlet.isValidRequestor(context,
         "hdfs/host2@TEST-REALM.COM", conf));
     
     // Mark atm as an admin.
@@ -81,15 +81,15 @@ public class TestGetImageServlet {
     }))).thenReturn(true);
     
     // Make sure that NN2 is still considered a valid requestor.
-    assertTrue(GetImageServlet.isValidRequestor(context,
+    assertTrue(ImageServlet.isValidRequestor(context,
         "hdfs/host2@TEST-REALM.COM", conf));
     
     // Make sure an admin is considered a valid requestor.
-    assertTrue(GetImageServlet.isValidRequestor(context,
+    assertTrue(ImageServlet.isValidRequestor(context,
         "atm@TEST-REALM.COM", conf));
     
     // Make sure other users are *not* considered valid requestors.
-    assertFalse(GetImageServlet.isValidRequestor(context,
+    assertFalse(ImageServlet.isValidRequestor(context,
         "todd@TEST-REALM.COM", conf));
   }
 }

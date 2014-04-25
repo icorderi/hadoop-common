@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -33,6 +34,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.NMToken;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -150,7 +152,7 @@ public class SchedulerApplicationAttempt {
     return appSchedulingInfo.getPriorities();
   }
   
-  public ResourceRequest getResourceRequest(Priority priority, String resourceName) {
+  public synchronized ResourceRequest getResourceRequest(Priority priority, String resourceName) {
     return this.appSchedulingInfo.getResourceRequest(priority, resourceName);
   }
 
@@ -158,7 +160,7 @@ public class SchedulerApplicationAttempt {
     return getResourceRequest(priority, ResourceRequest.ANY).getNumContainers();
   }
 
-  public Resource getResource(Priority priority) {
+  public synchronized Resource getResource(Priority priority) {
     return appSchedulingInfo.getResource(priority);
   }
 
@@ -253,13 +255,15 @@ public class SchedulerApplicationAttempt {
       this.reservedContainers.put(priority, reservedContainers);
     }
     reservedContainers.put(node.getNodeID(), rmContainer);
-    
-    LOG.info("Application " + getApplicationId() 
-        + " reserved container " + rmContainer
-        + " on node " + node + ", currently has " + reservedContainers.size()
-        + " at priority " + priority 
-        + "; currentReservation " + currentReservation.getMemory());
-    
+
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Application attempt " + getApplicationAttemptId()
+          + " reserved container " + rmContainer + " on node " + node
+          + ". This attempt currently has " + reservedContainers.size()
+          + " reserved containers at priority " + priority
+          + "; currentReservation " + currentReservation.getMemory());
+    }
+
     return rmContainer;
   }
   
@@ -339,16 +343,60 @@ public class SchedulerApplicationAttempt {
     return currentConsumption;
   }
 
-  public synchronized List<Container> pullNewlyAllocatedContainers() {
-    List<Container> returnContainerList = new ArrayList<Container>(
-        newlyAllocatedContainers.size());
-    for (RMContainer rmContainer : newlyAllocatedContainers) {
-      rmContainer.handle(new RMContainerEvent(rmContainer.getContainerId(),
-          RMContainerEventType.ACQUIRED));
-      returnContainerList.add(rmContainer.getContainer());
+  public static class ContainersAndNMTokensAllocation {
+    List<Container> containerList;
+    List<NMToken> nmTokenList;
+
+    public ContainersAndNMTokensAllocation(List<Container> containerList,
+        List<NMToken> nmTokenList) {
+      this.containerList = containerList;
+      this.nmTokenList = nmTokenList;
     }
-    newlyAllocatedContainers.clear();
-    return returnContainerList;
+
+    public List<Container> getContainerList() {
+      return containerList;
+    }
+
+    public List<NMToken> getNMTokenList() {
+      return nmTokenList;
+    }
+  }
+
+  // Create container token and NMToken altogether, if either of them fails for
+  // some reason like DNS unavailable, do not return this container and keep it
+  // in the newlyAllocatedContainers waiting to be refetched.
+  public synchronized ContainersAndNMTokensAllocation
+      pullNewlyAllocatedContainersAndNMTokens() {
+    List<Container> returnContainerList =
+        new ArrayList<Container>(newlyAllocatedContainers.size());
+    List<NMToken> nmTokens = new ArrayList<NMToken>();
+    for (Iterator<RMContainer> i = newlyAllocatedContainers.iterator(); i
+      .hasNext();) {
+      RMContainer rmContainer = i.next();
+      Container container = rmContainer.getContainer();
+      try {
+        // create container token and NMToken altogether.
+        container.setContainerToken(rmContext.getContainerTokenSecretManager()
+          .createContainerToken(container.getId(), container.getNodeId(),
+            getUser(), container.getResource()));
+        NMToken nmToken =
+            rmContext.getNMTokenSecretManager().createAndGetNMToken(getUser(),
+              getApplicationAttemptId(), container);
+        if (nmToken != null) {
+          nmTokens.add(nmToken);
+        }
+      } catch (IllegalArgumentException e) {
+        // DNS might be down, skip returning this container.
+        LOG.error("Error trying to assign container token and NM token to" +
+            " an allocated container " + container.getId(), e);
+        continue;
+      }
+      returnContainerList.add(container);
+      i.remove();
+      rmContainer.handle(new RMContainerEvent(rmContainer.getContainerId(),
+        RMContainerEventType.ACQUIRED));
+    }
+    return new ContainersAndNMTokensAllocation(returnContainerList, nmTokens);
   }
 
   public synchronized void updateBlacklist(
@@ -432,7 +480,7 @@ public class SchedulerApplicationAttempt {
       .transferStateFromPreviousAppSchedulingInfo(appAttempt.appSchedulingInfo);
   }
   
-  public void move(Queue newQueue) {
+  public synchronized void move(Queue newQueue) {
     QueueMetrics oldMetrics = queue.getMetrics();
     QueueMetrics newMetrics = newQueue.getMetrics();
     String user = getUser();

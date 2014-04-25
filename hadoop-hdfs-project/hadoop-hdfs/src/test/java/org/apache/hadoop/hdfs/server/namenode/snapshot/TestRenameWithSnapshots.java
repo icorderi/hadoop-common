@@ -73,7 +73,6 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
-;
 
 /** Testing rename with snapshots. */
 public class TestRenameWithSnapshots {
@@ -88,12 +87,12 @@ public class TestRenameWithSnapshots {
   private static final short REPL_2 = 1;
   private static final long BLOCKSIZE = 1024;
   
-  private static Configuration conf = new Configuration();
+  private static final Configuration conf = new Configuration();
   private static MiniDFSCluster cluster;
   private static FSNamesystem fsn;
   private static FSDirectory fsdir;
   private static DistributedFileSystem hdfs;
-  private static String testDir =
+  private static final String testDir =
       System.getProperty("test.build.data", "build/test/data");
   static private final Path dir = new Path("/testRenameWithSnapshots");
   static private final Path sub1 = new Path(dir, "sub1");
@@ -1593,7 +1592,7 @@ public class TestRenameWithSnapshots {
     INode barNode = fsdir.getINode4Write(bar.toString());
     assertTrue(barNode.getClass() == INodeFile.class);
     assertSame(fooNode, barNode.getParent());
-    List<DirectoryDiff> diffList = ((INodeDirectorySnapshottable) dir1Node)
+    List<DirectoryDiff> diffList = dir1Node
         .getDiffs().asList();
     assertEquals(1, diffList.size());
     DirectoryDiff diff = diffList.get(0);
@@ -1667,7 +1666,7 @@ public class TestRenameWithSnapshots {
     INode fooNode = childrenList.get(0);
     assertTrue(fooNode.asDirectory().isWithSnapshot());
     assertSame(dir1Node, fooNode.getParent());
-    List<DirectoryDiff> diffList = ((INodeDirectorySnapshottable) dir1Node)
+    List<DirectoryDiff> diffList = dir1Node
         .getDiffs().asList();
     assertEquals(1, diffList.size());
     DirectoryDiff diff = diffList.get(0);
@@ -1830,7 +1829,7 @@ public class TestRenameWithSnapshots {
   }
   
   /**
-   * move a directory to its prior descedant
+   * move a directory to its prior descendant
    */
   @Test
   public void testRename2PreDescendant_2() throws Exception {

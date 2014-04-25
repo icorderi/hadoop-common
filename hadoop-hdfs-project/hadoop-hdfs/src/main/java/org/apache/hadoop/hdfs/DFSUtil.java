@@ -37,12 +37,12 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMESERVICE_ID;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UnsupportedEncodingException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -69,7 +69,6 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
@@ -185,7 +184,7 @@ public class DFSUtil {
    */ 
   @InterfaceAudience.Private 
   public static class DecomStaleComparator implements Comparator<DatanodeInfo> {
-    private long staleInterval;
+    private final long staleInterval;
 
     /**
      * Constructor of DecomStaleComparator
@@ -262,6 +261,45 @@ public class DFSUtil {
   }
 
   /**
+   * Checks if a string is a valid path component. For instance, components
+   * cannot contain a ":" or "/", and cannot be equal to a reserved component
+   * like ".snapshot".
+   * <p>
+   * The primary use of this method is for validating paths when loading the
+   * FSImage. During normal NN operation, paths are sometimes allowed to
+   * contain reserved components.
+   * 
+   * @return If component is valid
+   */
+  public static boolean isValidNameForComponent(String component) {
+    if (component.equals(".") ||
+        component.equals("..") ||
+        component.indexOf(":") >= 0 ||
+        component.indexOf("/") >= 0) {
+      return false;
+    }
+    return !isReservedPathComponent(component);
+  }
+
+
+  /**
+   * Returns if the component is reserved.
+   * 
+   * <p>
+   * Note that some components are only reserved under certain directories, e.g.
+   * "/.reserved" is reserved, while "/hadoop/.reserved" is not.
+   * @return true, if the component is reserved
+   */
+  public static boolean isReservedPathComponent(String component) {
+    for (String reserved : HdfsConstants.RESERVED_PATH_COMPONENTS) {
+      if (component.equals(reserved)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Converts a byte array to a string using UTF8 encoding.
    */
   public static String bytes2String(byte[] bytes) {
@@ -312,7 +350,25 @@ public class DFSUtil {
     }
     return result.toString();
   }
-  
+
+  /**
+   * Converts a list of path components into a path using Path.SEPARATOR.
+   * 
+   * @param components Path components
+   * @return Combined path as a UTF-8 string
+   */
+  public static String strings2PathString(String[] components) {
+    if (components.length == 0) {
+      return "";
+    }
+    if (components.length == 1) {
+      if (components[0] == null || components[0].isEmpty()) {
+        return Path.SEPARATOR;
+      }
+    }
+    return Joiner.on(Path.SEPARATOR).join(components);
+  }
+
   /**
    * Given a list of path components returns a byte array
    */
@@ -623,7 +679,7 @@ public class DFSUtil {
           Configuration confForNn = new Configuration(conf);
           NameNode.initializeGenericKeys(confForNn, nsId, nnId);
           String principal = SecurityUtil.getServerPrincipal(confForNn
-              .get(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY),
+              .get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY),
               NameNode.getAddress(confForNn).getHostName());
           principals.add(principal);
         }
@@ -631,7 +687,7 @@ public class DFSUtil {
         Configuration confForNn = new Configuration(conf);
         NameNode.initializeGenericKeys(confForNn, nsId, null);
         String principal = SecurityUtil.getServerPrincipal(confForNn
-            .get(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY),
+            .get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY),
             NameNode.getAddress(confForNn).getHostName());
         principals.add(principal);
       }
@@ -671,46 +727,6 @@ public class DFSUtil {
     }
   }
 
-  /**
-   * Resolve an HDFS URL into real INetSocketAddress. It works like a DNS resolver
-   * when the URL points to an non-HA cluster. When the URL points to an HA
-   * cluster, the resolver further resolves the logical name (i.e., the authority
-   * in the URL) into real namenode addresses.
-   */
-  public static InetSocketAddress[] resolveWebHdfsUri(URI uri, Configuration conf)
-      throws IOException {
-    int defaultPort;
-    String scheme = uri.getScheme();
-    if (WebHdfsFileSystem.SCHEME.equals(scheme)) {
-      defaultPort = DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT;
-    } else if (SWebHdfsFileSystem.SCHEME.equals(scheme)) {
-      defaultPort = DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT;
-    } else {
-      throw new IllegalArgumentException("Unsupported scheme: " + scheme);
-    }
-
-    ArrayList<InetSocketAddress> ret = new ArrayList<InetSocketAddress>();
-
-    if (!HAUtil.isLogicalUri(conf, uri)) {
-      InetSocketAddress addr = NetUtils.createSocketAddr(uri.getAuthority(),
-          defaultPort);
-      ret.add(addr);
-
-    } else {
-      Map<String, Map<String, InetSocketAddress>> addresses = DFSUtil
-          .getHaNnWebHdfsAddresses(conf, scheme);
-
-      for (Map<String, InetSocketAddress> addrs : addresses.values()) {
-        for (InetSocketAddress addr : addrs.values()) {
-          ret.add(addr);
-        }
-      }
-    }
-
-    InetSocketAddress[] r = new InetSocketAddress[ret.size()];
-    return ret.toArray(r);
-  }
-  
   /**
    * Returns list of InetSocketAddress corresponding to  backup node rpc 
    * addresses from the configuration.
@@ -997,8 +1013,8 @@ public class DFSUtil {
   /**
    * return server http or https address from the configuration for a
    * given namenode rpc address.
-   * @param conf
    * @param namenodeAddr - namenode RPC address
+   * @param conf configuration
    * @param scheme - the scheme (http / https)
    * @return server http or https address
    * @throws IOException 
@@ -1083,7 +1099,8 @@ public class DFSUtil {
     InetSocketAddress sockAddr = NetUtils.createSocketAddr(configuredAddress);
     InetSocketAddress defaultSockAddr = NetUtils.createSocketAddr(defaultHost
         + ":0");
-    if (sockAddr.getAddress().isAnyLocalAddress()) {
+    final InetAddress addr = sockAddr.getAddress();
+    if (addr != null && addr.isAnyLocalAddress()) {
       if (UserGroupInformation.isSecurityEnabled() &&
           defaultSockAddr.getAddress().isAnyLocalAddress()) {
         throw new IOException("Cannot use a wildcard address with security. " +
@@ -1172,7 +1189,7 @@ public class DFSUtil {
   }
   
   /** Create {@link ClientDatanodeProtocol} proxy using kerberos ticket */
-  static ClientDatanodeProtocol createClientDatanodeProtocolProxy(
+  public static ClientDatanodeProtocol createClientDatanodeProtocolProxy(
       DatanodeID datanodeid, Configuration conf, int socketTimeout,
       boolean connectToDnViaHostname) throws IOException {
     return new ClientDatanodeProtocolTranslatorPB(
@@ -1308,7 +1325,7 @@ public class DFSUtil {
   /**
    * For given set of {@code keys} adds nameservice Id and or namenode Id
    * and returns {nameserviceId, namenodeId} when address match is found.
-   * @see #getSuffixIDs(Configuration, String, AddressMatcher)
+   * @see #getSuffixIDs(Configuration, String, String, String, AddressMatcher)
    */
   static String[] getSuffixIDs(final Configuration conf,
       final InetSocketAddress address, final String... keys) {
@@ -1399,8 +1416,8 @@ public class DFSUtil {
     }
   }
   
-  public static Options helpOptions = new Options();
-  public static Option helpOpt = new Option("h", "help", false,
+  public static final Options helpOptions = new Options();
+  public static final Option helpOpt = new Option("h", "help", false,
       "get help information");
 
   static {
@@ -1480,9 +1497,8 @@ public class DFSUtil {
   /**
    * Get SPNEGO keytab Key from configuration
    * 
-   * @param conf
-   *          Configuration
-   * @param defaultKey
+   * @param conf Configuration
+   * @param defaultKey default key to be used for config lookup
    * @return DFS_WEB_AUTHENTICATION_KERBEROS_KEYTAB_KEY if the key is not empty
    *         else return defaultKey
    */
@@ -1494,45 +1510,15 @@ public class DFSUtil {
   }
 
   /**
-   * Get http policy. Http Policy is chosen as follows:
-   * <ol>
-   * <li>If hadoop.ssl.enabled is set, http endpoints are not started. Only
-   * https endpoints are started on configured https ports</li>
-   * <li>This configuration is overridden by dfs.https.enable configuration, if
-   * it is set to true. In that case, both http and https endpoints are stared.</li>
-   * <li>All the above configurations are overridden by dfs.http.policy
-   * configuration. With this configuration you can set http-only, https-only
-   * and http-and-https endpoints.</li>
-   * </ol>
-   * See hdfs-default.xml documentation for more details on each of the above
-   * configuration settings.
+   * Get http policy.
    */
   public static HttpConfig.Policy getHttpPolicy(Configuration conf) {
-    String httpPolicy = conf.get(DFSConfigKeys.DFS_HTTP_POLICY_KEY,
+    String policyStr = conf.get(DFSConfigKeys.DFS_HTTP_POLICY_KEY,
         DFSConfigKeys.DFS_HTTP_POLICY_DEFAULT);
-
-    HttpConfig.Policy policy = HttpConfig.Policy.fromString(httpPolicy);
-
-    if (policy == HttpConfig.Policy.HTTP_ONLY) {
-      boolean httpsEnabled = conf.getBoolean(
-          DFSConfigKeys.DFS_HTTPS_ENABLE_KEY,
-          DFSConfigKeys.DFS_HTTPS_ENABLE_DEFAULT);
-
-      boolean hadoopSslEnabled = conf.getBoolean(
-          CommonConfigurationKeys.HADOOP_SSL_ENABLED_KEY,
-          CommonConfigurationKeys.HADOOP_SSL_ENABLED_DEFAULT);
-
-      if (hadoopSslEnabled) {
-        LOG.warn(CommonConfigurationKeys.HADOOP_SSL_ENABLED_KEY
-            + " is deprecated. Please use "
-            + DFSConfigKeys.DFS_HTTPS_ENABLE_KEY + ".");
-        policy = HttpConfig.Policy.HTTPS_ONLY;
-      } else if (httpsEnabled) {
-        LOG.warn(DFSConfigKeys.DFS_HTTPS_ENABLE_KEY
-            + " is deprecated. Please use "
-            + DFSConfigKeys.DFS_HTTPS_ENABLE_KEY + ".");
-        policy = HttpConfig.Policy.HTTP_AND_HTTPS;
-      }
+    HttpConfig.Policy policy = HttpConfig.Policy.fromString(policyStr);
+    if (policy == null) {
+      throw new HadoopIllegalArgumentException("Unregonized value '"
+          + policyStr + "' for " + DFSConfigKeys.DFS_HTTP_POLICY_KEY);
     }
 
     conf.set(DFSConfigKeys.DFS_HTTP_POLICY_KEY, policy.name());
@@ -1693,23 +1679,19 @@ public class DFSUtil {
    * 
    * @param objects the collection of objects to check for equality.
    */
-  public static void assertAllResultsEqual(Collection<?> objects) {
-    Object[] resultsArray = objects.toArray();
-    
-    if (resultsArray.length == 0)
+  public static void assertAllResultsEqual(Collection<?> objects)
+      throws AssertionError {
+    if (objects.size() == 0 || objects.size() == 1)
       return;
     
-    for (int i = 0; i < resultsArray.length; i++) {
-      if (i == 0)
-        continue;
-      else {
-        Object currElement = resultsArray[i];
-        Object lastElement = resultsArray[i - 1];
-        if ((currElement == null && currElement != lastElement) ||
-            (currElement != null && !currElement.equals(lastElement))) {
-          throw new AssertionError("Not all elements match in results: " +
-            Arrays.toString(resultsArray));
-        }
+    Object[] resultsArray = objects.toArray();
+    for (int i = 1; i < resultsArray.length; i++) {
+      Object currElement = resultsArray[i];
+      Object lastElement = resultsArray[i - 1];
+      if ((currElement == null && currElement != lastElement) ||
+          (currElement != null && !currElement.equals(lastElement))) {
+        throw new AssertionError("Not all elements match in results: " +
+          Arrays.toString(resultsArray));
       }
     }
   }

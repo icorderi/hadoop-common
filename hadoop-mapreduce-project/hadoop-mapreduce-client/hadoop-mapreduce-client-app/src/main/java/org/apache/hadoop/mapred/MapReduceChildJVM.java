@@ -19,6 +19,7 @@
 package org.apache.hadoop.mapred;
 
 import java.net.InetSocketAddress;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +33,6 @@ import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.util.Apps;
 
 @SuppressWarnings("deprecation")
 public class MapReduceChildJVM {
@@ -69,17 +69,16 @@ public class MapReduceChildJVM {
       Task task) {
 
     JobConf conf = task.conf;
-
     // Add the env variables passed by the user
     String mapredChildEnv = getChildEnv(conf, task.isMapTask());
-    Apps.setEnvFromInputString(environment, mapredChildEnv);
+    MRApps.setEnvFromInputString(environment, mapredChildEnv, conf);
 
     // Set logging level in the environment.
     // This is so that, if the child forks another "bin/hadoop" (common in
     // streaming) it will have the correct loglevel.
     environment.put(
         "HADOOP_ROOT_LOGGER", 
-        getChildLogLevel(conf, task.isMapTask()) + ",CLA"); 
+        getChildLogLevel(conf, task.isMapTask()) + ",console");
 
     // TODO: The following is useful for instance in streaming tasks. Should be
     // set in ApplicationMaster's env by the RM.
@@ -89,18 +88,19 @@ public class MapReduceChildJVM {
     } else {
       hadoopClientOpts = hadoopClientOpts + " ";
     }
-    // FIXME: don't think this is also needed given we already set java
-    // properties.
-    long logSize = TaskLog.getTaskLogLength(conf);
-    Vector<String> logProps = new Vector<String>(4);
-    setupLog4jProperties(task, logProps, logSize);
-    Iterator<String> it = logProps.iterator();
-    StringBuffer buffer = new StringBuffer();
-    while (it.hasNext()) {
-      buffer.append(" " + it.next());
-    }
-    hadoopClientOpts = hadoopClientOpts + buffer.toString();
     environment.put("HADOOP_CLIENT_OPTS", hadoopClientOpts);
+    
+    // setEnvFromInputString above will add env variable values from
+    // mapredChildEnv to existing variables. We want to overwrite
+    // HADOOP_ROOT_LOGGER and HADOOP_CLIENT_OPTS if the user set it explicitly.
+    Map<String, String> tmpEnv = new HashMap<String, String>();
+    MRApps.setEnvFromInputString(tmpEnv, mapredChildEnv, conf);
+    String[] keys = { "HADOOP_ROOT_LOGGER", "HADOOP_CLIENT_OPTS" };
+    for (String key : keys) {
+      if (tmpEnv.containsKey(key)) {
+        environment.put(key, tmpEnv.get(key));
+      }
+    }
 
     // Add stdout/stderr env
     environment.put(
@@ -164,7 +164,8 @@ public class MapReduceChildJVM {
 
     Vector<String> vargs = new Vector<String>(8);
 
-    vargs.add(Environment.JAVA_HOME.$() + "/bin/java");
+    vargs.add(MRApps.crossPlatformifyMREnv(task.conf, Environment.JAVA_HOME)
+        + "/bin/java");
 
     // Add child (task) java-vm options.
     //
@@ -201,7 +202,7 @@ public class MapReduceChildJVM {
       vargs.add(javaOptsSplit[i]);
     }
 
-    Path childTmpDir = new Path(Environment.PWD.$(),
+    Path childTmpDir = new Path(MRApps.crossPlatformifyMREnv(conf, Environment.PWD),
         YarnConfiguration.DEFAULT_CONTAINER_TEMP_DIR);
     vargs.add("-Djava.io.tmpdir=" + childTmpDir);
 

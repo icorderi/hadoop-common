@@ -27,11 +27,9 @@ import java.net.URI;
 import java.net.URL;
 import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
-import java.util.Collection;
-import java.util.Date;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 
+import com.google.common.collect.Lists;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -70,6 +68,7 @@ import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+import org.apache.hadoop.metrics2.util.MBeans;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -80,6 +79,9 @@ import org.apache.hadoop.util.Time;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import org.apache.hadoop.util.VersionInfo;
+
+import javax.management.ObjectName;
 
 /**********************************************************
  * The Secondary NameNode is a helper to the primary NameNode.
@@ -95,7 +97,8 @@ import com.google.common.collect.ImmutableList;
  *
  **********************************************************/
 @InterfaceAudience.Private
-public class SecondaryNameNode implements Runnable {
+public class SecondaryNameNode implements Runnable,
+        SecondaryNameNodeInfoMXBean {
     
   static{
     HdfsConfiguration.init();
@@ -114,7 +117,6 @@ public class SecondaryNameNode implements Runnable {
   private InetSocketAddress nameNodeAddr;
   private volatile boolean shouldRun;
   private HttpServer2 infoServer;
-  private URL imageListenURL;
 
   private Collection<URI> checkpointDirs;
   private List<URI> checkpointEditsDirs;
@@ -123,14 +125,16 @@ public class SecondaryNameNode implements Runnable {
   private FSNamesystem namesystem;
 
   private Thread checkpointThread;
-
+  private ObjectName nameNodeStatusBeanName;
 
   @Override
   public String toString() {
     return getClass().getSimpleName() + " Status" 
       + "\nName Node Address    : " + nameNodeAddr   
       + "\nStart Time           : " + new Date(starttime)
-      + "\nLast Checkpoint Time : " + (lastCheckpointTime == 0? "--": new Date(lastCheckpointTime))
+      + "\nLast Checkpoint      : " + (lastCheckpointTime == 0? "--":
+				       ((Time.monotonicNow() - lastCheckpointTime) / 1000))
+	                            + " seconds ago"
       + "\nCheckpoint Period    : " + checkpointConf.getPeriod() + " seconds"
       + "\nCheckpoint Size      : " + StringUtils.byteDesc(checkpointConf.getTxnCount())
                                     + " (= " + checkpointConf.getTxnCount() + " bytes)" 
@@ -168,11 +172,6 @@ public class SecondaryNameNode implements Runnable {
     this.namenode = namenode;
   }
 
-  @VisibleForTesting
-  List<URI> getCheckpointDirs() {
-    return ImmutableList.copyOf(checkpointDirs);
-  }
-  
   /**
    * Create a connection to the primary namenode.
    */
@@ -208,7 +207,6 @@ public class SecondaryNameNode implements Runnable {
   
   /**
    * Initialize SecondaryNameNode.
-   * @param commandLineOpts
    */
   private void initialize(final Configuration conf,
       CommandLineOpts commandLineOpts) throws IOException {
@@ -218,7 +216,7 @@ public class SecondaryNameNode implements Runnable {
     if (UserGroupInformation.isSecurityEnabled()) {
       SecurityUtil.login(conf,
           DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY,
-          DFSConfigKeys.DFS_SECONDARY_NAMENODE_USER_NAME_KEY, infoBindAddress);
+          DFSConfigKeys.DFS_SECONDARY_NAMENODE_KERBEROS_PRINCIPAL_KEY, infoBindAddress);
     }
     // initiate Java VM metrics
     DefaultMetricsSystem.initialize("SecondaryNameNode");
@@ -247,6 +245,9 @@ public class SecondaryNameNode implements Runnable {
     
     namesystem = new FSNamesystem(conf, checkpointImage, true);
 
+    // Disable quota checks
+    namesystem.dir.disableQuotaChecks();
+
     // Initialize other scheduling parameters from the configuration
     checkpointConf = new CheckpointConf(conf);
 
@@ -259,21 +260,22 @@ public class SecondaryNameNode implements Runnable {
 
     HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
         httpAddr, httpsAddr, "secondary",
-        DFSConfigKeys.DFS_SECONDARY_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY,
+        DFSConfigKeys.DFS_SECONDARY_NAMENODE_KERBEROS_INTERNAL_SPNEGO_PRINCIPAL_KEY,
         DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY);
+
+    nameNodeStatusBeanName = MBeans.register("SecondaryNameNode",
+            "SecondaryNameNodeInfo", this);
 
     infoServer = builder.build();
 
     infoServer.setAttribute("secondary.name.node", this);
     infoServer.setAttribute("name.system.image", checkpointImage);
     infoServer.setAttribute(JspHelper.CURRENT_CONF, conf);
-    infoServer.addInternalServlet("getimage", "/getimage",
-                                  GetImageServlet.class, true);
+    infoServer.addInternalServlet("imagetransfer", ImageServlet.PATH_SPEC,
+        ImageServlet.class, true);
     infoServer.start();
 
     LOG.info("Web server init done");
-    imageListenURL = new URL(DFSUtil.getHttpClientScheme(conf) + "://"
-        + NetUtils.getHostPortString(infoServer.getConnectorAddress(0)));
 
     HttpConfig.Policy policy = DFSUtil.getHttpPolicy(conf);
     int connIdx = 0;
@@ -329,6 +331,10 @@ public class SecondaryNameNode implements Runnable {
     } catch (Exception e) {
       LOG.warn("Exception shutting down SecondaryNameNode", e);
     }
+    if (nameNodeStatusBeanName != null) {
+      MBeans.unregister(nameNodeStatusBeanName);
+      nameNodeStatusBeanName = null;
+    }
     try {
       if (checkpointImage != null) {
         checkpointImage.close();
@@ -379,7 +385,7 @@ public class SecondaryNameNode implements Runnable {
         if(UserGroupInformation.isSecurityEnabled())
           UserGroupInformation.getCurrentUser().checkTGTAndReloginFromKeytab();
         
-        long now = Time.now();
+        final long now = Time.monotonicNow();
 
         if (shouldCheckpointBasedOnCount() ||
             now >= lastCheckpointTime + 1000 * checkpointConf.getPeriod()) {
@@ -445,8 +451,9 @@ public class SecondaryNameNode implements Runnable {
             } else {
               LOG.info("Image has changed. Downloading updated image from NN.");
               MD5Hash downloadedHash = TransferFsImage.downloadImageToStorage(
-                  nnHostPort, sig.mostRecentCheckpointTxId, dstImage.getStorage(), true);
-              dstImage.saveDigestAndRenameCheckpointImage(
+                  nnHostPort, sig.mostRecentCheckpointTxId,
+                  dstImage.getStorage(), true);
+              dstImage.saveDigestAndRenameCheckpointImage(NameNodeFile.IMAGE,
                   sig.mostRecentCheckpointTxId, downloadedHash);
             }
         
@@ -486,14 +493,6 @@ public class SecondaryNameNode implements Runnable {
     LOG.debug("Will connect to NameNode at " + address);
     return address.toURL();
   }
-  
-  /**
-   * Return the host:port of where this SecondaryNameNode is listening
-   * for image transfers
-   */
-  private URL getImageListenAddress() {
-    return imageListenURL;
-  }
 
   /**
    * Create a new checkpoint
@@ -511,8 +510,10 @@ public class SecondaryNameNode implements Runnable {
     boolean loadImage = false;
     boolean isFreshCheckpointer = (checkpointImage.getNamespaceID() == 0);
     boolean isSameCluster =
-        (dstStorage.versionSupportsFederation() && sig.isSameCluster(checkpointImage)) ||
-        (!dstStorage.versionSupportsFederation() && sig.namespaceIdMatches(checkpointImage));
+        (dstStorage.versionSupportsFederation(NameNodeLayoutVersion.FEATURES)
+            && sig.isSameCluster(checkpointImage)) ||
+        (!dstStorage.versionSupportsFederation(NameNodeLayoutVersion.FEATURES)
+            && sig.namespaceIdMatches(checkpointImage));
     if (isFreshCheckpointer ||
         (isSameCluster &&
          !sig.storageVersionMatches(checkpointImage.getStorage()))) {
@@ -552,8 +553,8 @@ public class SecondaryNameNode implements Runnable {
     // to make this new uploaded image as the most current image.
     //
     long txid = checkpointImage.getLastAppliedTxId();
-    TransferFsImage.uploadImageFromStorage(fsName, getImageListenAddress(),
-        dstStorage, txid);
+    TransferFsImage.uploadImageFromStorage(fsName, conf, dstStorage,
+        NameNodeFile.IMAGE, txid);
 
     // error simulation code for junit test
     CheckpointFaultInjector.getInstance().afterSecondaryUploadsNewImage();
@@ -683,6 +684,50 @@ public class SecondaryNameNode implements Runnable {
     checkpointThread.start();
   }
 
+  @Override // SecondaryNameNodeInfoMXXBean
+  public String getHostAndPort() {
+    return NetUtils.getHostPortString(nameNodeAddr);
+  }
+
+  @Override // SecondaryNameNodeInfoMXXBean
+  public long getStartTime() {
+    return starttime;
+  }
+
+  @Override // SecondaryNameNodeInfoMXXBean
+  public long getLastCheckpointTime() {
+    return lastCheckpointTime;
+  }
+
+  @Override // SecondaryNameNodeInfoMXXBean
+  public String[] getCheckpointDirectories() {
+    ArrayList<String> r = Lists.newArrayListWithCapacity(checkpointDirs.size());
+    for (URI d : checkpointDirs) {
+      r.add(d.toString());
+    }
+    return r.toArray(new String[r.size()]);
+  }
+
+  @Override // SecondaryNameNodeInfoMXXBean
+  public String[] getCheckpointEditlogDirectories() {
+    ArrayList<String> r = Lists.newArrayListWithCapacity(checkpointEditsDirs.size());
+    for (URI d : checkpointEditsDirs) {
+      r.add(d.toString());
+    }
+    return r.toArray(new String[r.size()]);
+  }
+
+  @Override // VersionInfoMXBean
+  public String getCompileInfo() {
+    return VersionInfo.getDate() + " by " + VersionInfo.getUser() +
+            " from " + VersionInfo.getBranch();
+  }
+
+  @Override // VersionInfoMXBean
+  public String getSoftwareVersion() {
+    return VersionInfo.getVersion();
+  }
+
 
   /**
    * Container for parsed command-line options.
@@ -802,8 +847,8 @@ public class SecondaryNameNode implements Runnable {
     private int mergeErrorCount;
     private static class CheckpointLogPurger implements LogsPurgeable {
       
-      private NNStorage storage;
-      private StoragePurger purger
+      private final NNStorage storage;
+      private final StoragePurger purger
           = new NNStorageRetentionManager.DeletionStoragePurger();
       
       public CheckpointLogPurger(NNStorage storage) {
@@ -856,7 +901,7 @@ public class SecondaryNameNode implements Runnable {
                       Collection<URI> imageDirs,
                       List<URI> editsDirs) throws IOException {
       super(conf, imageDirs, editsDirs);
-      
+
       // the 2NN never writes edits -- it only downloads them. So
       // we shouldn't have any editLog instance. Setting to null
       // makes sure we don't accidentally depend on it.
@@ -995,7 +1040,8 @@ public class SecondaryNameNode implements Runnable {
     
     dstStorage.setStorageInfo(sig);
     if (loadImage) {
-      File file = dstStorage.findImageFile(sig.mostRecentCheckpointTxId);
+      File file = dstStorage.findImageFile(NameNodeFile.IMAGE,
+          sig.mostRecentCheckpointTxId);
       if (file == null) {
         throw new IOException("Couldn't find image file at txid " + 
             sig.mostRecentCheckpointTxId + " even though it should have " +

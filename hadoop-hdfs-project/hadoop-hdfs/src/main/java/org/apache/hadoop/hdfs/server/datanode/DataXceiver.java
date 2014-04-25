@@ -18,11 +18,12 @@
 package org.apache.hadoop.hdfs.server.datanode;
 
 import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.ERROR;
-import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.ERROR_UNSUPPORTED;
 import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.ERROR_ACCESS_TOKEN;
+import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.ERROR_INVALID;
+import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.ERROR_UNSUPPORTED;
 import static org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status.SUCCESS;
-import static org.apache.hadoop.util.Time.now;
 import static org.apache.hadoop.hdfs.server.datanode.DataNode.DN_CLIENTTRACE_FORMAT;
+import static org.apache.hadoop.util.Time.now;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -35,21 +36,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.nio.channels.ClosedChannelException;
 import java.util.Arrays;
 
 import org.apache.commons.logging.Log;
+import org.apache.hadoop.hdfs.ExtendedBlockId;
 import org.apache.hadoop.hdfs.net.Peer;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
+import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferEncryptor;
 import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferEncryptor.InvalidMagicNumberException;
 import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil;
-import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferEncryptor;
 import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Op;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Receiver;
@@ -58,6 +62,8 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.BlockOpResponseP
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ClientReadStatusProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpBlockChecksumResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReadOpChecksumInfoProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReleaseShortCircuitAccessResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.protocolPB.PBHelper;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
@@ -65,15 +71,19 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.datanode.DataNode.ShortCircuitFdsUnsupportedException;
 import org.apache.hadoop.hdfs.server.datanode.DataNode.ShortCircuitFdsVersionException;
+import org.apache.hadoop.hdfs.server.datanode.ShortCircuitRegistry.NewShmInfo;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.LengthInputStream;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.net.unix.DomainSocket;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
 
+import com.google.common.net.InetAddresses;
 import com.google.protobuf.ByteString;
 
 
@@ -84,7 +94,7 @@ class DataXceiver extends Receiver implements Runnable {
   public static final Log LOG = DataNode.LOG;
   static final Log ClientTraceLog = DataNode.ClientTraceLog;
   
-  private final Peer peer;
+  private Peer peer;
   private final String remoteAddress; // address of remote side
   private final String localAddress;  // local address of this daemon
   private final DataNode datanode;
@@ -158,11 +168,12 @@ class DataXceiver extends Receiver implements Runnable {
     int opsProcessed = 0;
     Op op = null;
 
-    dataXceiverServer.addPeer(peer);
     try {
+      dataXceiverServer.addPeer(peer, Thread.currentThread());
       peer.setWriteTimeout(datanode.getDnConf().socketWriteTimeout);
       InputStream input = socketIn;
-      if ((!peer.hasSecureChannel()) && dnConf.encryptDataTransfer) {
+      if ((!peer.hasSecureChannel()) && dnConf.encryptDataTransfer &&
+          !dnConf.trustedChannelResolver.isTrusted(getClientAddress(peer))){
         IOStreamPair encryptedStreams = null;
         try {
           encryptedStreams = DataTransferEncryptor.getEncryptedStreams(socketOut,
@@ -220,27 +231,54 @@ class DataXceiver extends Receiver implements Runnable {
         opStartTime = now();
         processOp(op);
         ++opsProcessed;
-      } while (!peer.isClosed() && dnConf.socketKeepaliveTimeout > 0);
+      } while ((peer != null) &&
+          (!peer.isClosed() && dnConf.socketKeepaliveTimeout > 0));
     } catch (Throwable t) {
-      LOG.error(datanode.getDisplayName() + ":DataXceiver error processing " +
-                ((op == null) ? "unknown" : op.name()) + " operation " +
-                " src: " + remoteAddress +
-                " dest: " + localAddress, t);
+      String s = datanode.getDisplayName() + ":DataXceiver error processing "
+          + ((op == null) ? "unknown" : op.name()) + " operation "
+          + " src: " + remoteAddress + " dst: " + localAddress;
+      if (op == Op.WRITE_BLOCK && t instanceof ReplicaAlreadyExistsException) {
+        // For WRITE_BLOCK, it is okay if the replica already exists since
+        // client and replication may write the same block to the same datanode
+        // at the same time.
+        if (LOG.isTraceEnabled()) {
+          LOG.trace(s, t);
+        } else {
+          LOG.info(s + "; " + t);
+        }
+      } else {
+        LOG.error(s, t);
+      }
     } finally {
       if (LOG.isDebugEnabled()) {
         LOG.debug(datanode.getDisplayName() + ":Number of active connections is: "
             + datanode.getXceiverCount());
       }
       updateCurrentThreadName("Cleaning up");
-      dataXceiverServer.closePeer(peer);
-      IOUtils.closeStream(in);
+      if (peer != null) {
+        dataXceiverServer.closePeer(peer);
+        IOUtils.closeStream(in);
+      }
     }
+  }
+  
+  /**
+   * Returns InetAddress from peer
+   * The getRemoteAddressString is the form  /ip-address:port
+   * The ip-address is extracted from peer and InetAddress is formed
+   * @param peer
+   * @return
+   * @throws UnknownHostException
+   */
+  private static InetAddress getClientAddress(Peer peer) {
+    return InetAddresses.forString(
+        peer.getRemoteAddressString().split(":")[0].substring(1));
   }
 
   @Override
   public void requestShortCircuitFds(final ExtendedBlock blk,
       final Token<BlockTokenIdentifier> token,
-      int maxVersion) throws IOException {
+      SlotId slotId, int maxVersion) throws IOException {
     updateCurrentThreadName("Passing file descriptors for block " + blk);
     BlockOpResponseProto.Builder bld = BlockOpResponseProto.newBuilder();
     FileInputStream fis[] = null;
@@ -249,7 +287,19 @@ class DataXceiver extends Receiver implements Runnable {
         throw new IOException("You cannot pass file descriptors over " +
             "anything but a UNIX domain socket.");
       }
-      fis = datanode.requestShortCircuitFdsForRead(blk, token, maxVersion);
+      if (slotId != null) {
+        boolean isCached = datanode.data.
+            isCached(blk.getBlockPoolId(), blk.getBlockId());
+        datanode.shortCircuitRegistry.registerSlot(
+            ExtendedBlockId.fromExtendedBlock(blk), slotId, isCached);
+      }
+      try {
+        fis = datanode.requestShortCircuitFdsForRead(blk, token, maxVersion);
+      } finally {
+        if ((fis == null) && (slotId != null)) {
+          datanode.shortCircuitRegistry.unregisterSlot(slotId);
+        }
+      }
       bld.setStatus(SUCCESS);
       bld.setShortCircuitAccessVersion(DataNode.CURRENT_BLOCK_FORMAT_VERSION);
     } catch (ShortCircuitFdsVersionException e) {
@@ -291,6 +341,122 @@ class DataXceiver extends Receiver implements Runnable {
         IOUtils.cleanup(LOG, fis);
       }
     }
+  }
+
+  @Override
+  public void releaseShortCircuitFds(SlotId slotId) throws IOException {
+    boolean success = false;
+    try {
+      String error;
+      Status status;
+      try {
+        datanode.shortCircuitRegistry.unregisterSlot(slotId);
+        error = null;
+        status = Status.SUCCESS;
+      } catch (UnsupportedOperationException e) {
+        error = "unsupported operation";
+        status = Status.ERROR_UNSUPPORTED;
+      } catch (Throwable e) {
+        error = e.getMessage();
+        status = Status.ERROR_INVALID;
+      }
+      ReleaseShortCircuitAccessResponseProto.Builder bld =
+          ReleaseShortCircuitAccessResponseProto.newBuilder();
+      bld.setStatus(status);
+      if (error != null) {
+        bld.setError(error);
+      }
+      bld.build().writeDelimitedTo(socketOut);
+      success = true;
+    } finally {
+      if (ClientTraceLog.isInfoEnabled()) {
+        BlockSender.ClientTraceLog.info(String.format(
+            "src: 127.0.0.1, dest: 127.0.0.1, op: RELEASE_SHORT_CIRCUIT_FDS," +
+            " shmId: %016x%016x, slotIdx: %d, srvID: %s, success: %b",
+            slotId.getShmId().getHi(), slotId.getShmId().getLo(),
+            slotId.getSlotIdx(), datanode.getDatanodeUuid(), success));
+      }
+    }
+  }
+
+  private void sendShmErrorResponse(Status status, String error)
+      throws IOException {
+    ShortCircuitShmResponseProto.newBuilder().setStatus(status).
+        setError(error).build().writeDelimitedTo(socketOut);
+  }
+
+  private void sendShmSuccessResponse(DomainSocket sock, NewShmInfo shmInfo)
+      throws IOException {
+    ShortCircuitShmResponseProto.newBuilder().setStatus(SUCCESS).
+        setId(PBHelper.convert(shmInfo.shmId)).build().
+        writeDelimitedTo(socketOut);
+    // Send the file descriptor for the shared memory segment.
+    byte buf[] = new byte[] { (byte)0 };
+    FileDescriptor shmFdArray[] =
+        new FileDescriptor[] { shmInfo.stream.getFD() };
+    sock.sendFileDescriptors(shmFdArray, buf, 0, buf.length);
+  }
+
+  @Override
+  public void requestShortCircuitShm(String clientName) throws IOException {
+    NewShmInfo shmInfo = null;
+    boolean success = false;
+    DomainSocket sock = peer.getDomainSocket();
+    try {
+      if (sock == null) {
+        sendShmErrorResponse(ERROR_INVALID, "Bad request from " +
+            peer + ": must request a shared " +
+            "memory segment over a UNIX domain socket.");
+        return;
+      }
+      try {
+        shmInfo = datanode.shortCircuitRegistry.
+            createNewMemorySegment(clientName, sock);
+        // After calling #{ShortCircuitRegistry#createNewMemorySegment}, the
+        // socket is managed by the DomainSocketWatcher, not the DataXceiver.
+        releaseSocket();
+      } catch (UnsupportedOperationException e) {
+        sendShmErrorResponse(ERROR_UNSUPPORTED, 
+            "This datanode has not been configured to support " +
+            "short-circuit shared memory segments.");
+        return;
+      } catch (IOException e) {
+        sendShmErrorResponse(ERROR,
+            "Failed to create shared file descriptor: " + e.getMessage());
+        return;
+      }
+      sendShmSuccessResponse(sock, shmInfo);
+      success = true;
+    } finally {
+      if (ClientTraceLog.isInfoEnabled()) {
+        if (success) {
+          BlockSender.ClientTraceLog.info(String.format(
+              "cliID: %s, src: 127.0.0.1, dest: 127.0.0.1, " +
+              "op: REQUEST_SHORT_CIRCUIT_SHM," +
+              " shmId: %016x%016x, srvID: %s, success: true",
+              clientName, shmInfo.shmId.getHi(), shmInfo.shmId.getLo(),
+              datanode.getDatanodeUuid()));
+        } else {
+          BlockSender.ClientTraceLog.info(String.format(
+              "cliID: %s, src: 127.0.0.1, dest: 127.0.0.1, " +
+              "op: REQUEST_SHORT_CIRCUIT_SHM, " +
+              "shmId: n/a, srvID: %s, success: false",
+              clientName, datanode.getDatanodeUuid()));
+        }
+      }
+      if ((!success) && (peer == null)) {
+        // If we failed to pass the shared memory segment to the client,
+        // close the UNIX domain socket now.  This will trigger the 
+        // DomainSocketWatcher callback, cleaning up the segment.
+        IOUtils.cleanup(null, sock);
+      }
+      IOUtils.cleanup(null, shmInfo);
+    }
+  }
+
+  void releaseSocket() {
+    dataXceiverServer.releasePeer(peer);
+    peer = null;
   }
 
   @Override
@@ -488,7 +654,8 @@ class DataXceiver extends Receiver implements Runnable {
           OutputStream unbufMirrorOut = NetUtils.getOutputStream(mirrorSock,
               writeTimeout);
           InputStream unbufMirrorIn = NetUtils.getInputStream(mirrorSock);
-          if (dnConf.encryptDataTransfer) {
+          if (dnConf.encryptDataTransfer &&
+              !dnConf.trustedChannelResolver.isTrusted(mirrorSock.getInetAddress())) {
             IOStreamPair encryptedStreams =
                 DataTransferEncryptor.getEncryptedStreams(
                     unbufMirrorOut, unbufMirrorIn,
@@ -814,7 +981,9 @@ class DataXceiver extends Receiver implements Runnable {
       OutputStream unbufProxyOut = NetUtils.getOutputStream(proxySock,
           dnConf.socketWriteTimeout);
       InputStream unbufProxyIn = NetUtils.getInputStream(proxySock);
-      if (dnConf.encryptDataTransfer) {
+      if (dnConf.encryptDataTransfer && 
+          !dnConf.trustedChannelResolver.isTrusted(
+              proxySock.getInetAddress())) {
         IOStreamPair encryptedStreams =
             DataTransferEncryptor.getEncryptedStreams(
                 unbufProxyOut, unbufProxyIn,
@@ -908,7 +1077,7 @@ class DataXceiver extends Receiver implements Runnable {
   /**
    * Utility function for sending a response.
    * 
-   * @param opStatus status message to write
+   * @param status status message to write
    * @param message message to send to the client or other DN
    */
   private void sendResponse(Status status,

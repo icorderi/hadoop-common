@@ -17,14 +17,11 @@
  */
 package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
 
-import static org.apache.hadoop.yarn.util.StringHelper.join;
-
 import javax.xml.bind.annotation.XmlAccessType;
 import javax.xml.bind.annotation.XmlAccessorType;
 import javax.xml.bind.annotation.XmlRootElement;
 import javax.xml.bind.annotation.XmlTransient;
 
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
@@ -33,11 +30,12 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+
+import com.google.common.base.Joiner;
 
 @XmlRootElement(name = "app")
 @XmlAccessorType(XmlAccessType.FIELD)
@@ -53,6 +51,8 @@ public class AppInfo {
   protected boolean amContainerLogsExist = false;
   @XmlTransient
   protected ApplicationId applicationId;
+  @XmlTransient
+  private String schemePrefix;
 
   // these are ok for any user to see
   protected String id;
@@ -67,6 +67,7 @@ public class AppInfo {
   protected String diagnostics;
   protected long clusterId;
   protected String applicationType;
+  protected String applicationTags = "";
   
   // these are only allowed if acls allow
   protected long startedTime;
@@ -81,12 +82,8 @@ public class AppInfo {
   public AppInfo() {
   } // JAXB needs this
 
-  public AppInfo(RMApp app, Boolean hasAccess, String host) {
-    this(app, hasAccess);
-  }
-
-  public AppInfo(RMApp app, Boolean hasAccess) {
-
+  public AppInfo(RMApp app, Boolean hasAccess, String schemePrefix) {
+    this.schemePrefix = schemePrefix;
     if (app != null) {
       String trackingUrl = app.getTrackingUrl();
       this.state = app.createApplicationState();
@@ -99,7 +96,7 @@ public class AppInfo {
           .getFinishTime() == 0 ? "ApplicationMaster" : "History");
       if (!trackingUrlIsNotReady) {
         this.trackingUrl =
-            WebAppUtils.getURLWithScheme(HttpConfig.getSchemePrefix(),
+            WebAppUtils.getURLWithScheme(schemePrefix,
                 trackingUrl);
         this.trackingUrlPretty = this.trackingUrl;
       } else {
@@ -117,6 +114,9 @@ public class AppInfo {
       if (diagnostics == null || diagnostics.isEmpty()) {
         this.diagnostics = "";
       }
+      if (app.getApplicationTags() != null && !app.getApplicationTags().isEmpty()) {
+        this.applicationTags = Joiner.on(',').join(app.getApplicationTags());
+      }
       this.finalStatus = app.getFinalApplicationStatus();
       this.clusterId = ResourceManager.getClusterTimeStamp();
       if (hasAccess) {
@@ -130,12 +130,10 @@ public class AppInfo {
           Container masterContainer = attempt.getMasterContainer();
           if (masterContainer != null) {
             this.amContainerLogsExist = true;
-            String url = join(HttpConfig.getSchemePrefix(),
-                masterContainer.getNodeHttpAddress(),
-                "/node", "/containerlogs/",
+            this.amContainerLogs = WebAppUtils.getRunningLogURL(
+                schemePrefix + masterContainer.getNodeHttpAddress(),
                 ConverterUtils.toString(masterContainer.getId()),
-                "/", app.getUser());
-            this.amContainerLogs = url;
+                app.getUser());
             this.amHostHttpAddress = masterContainer.getNodeHttpAddress();
           }
           
@@ -238,6 +236,10 @@ public class AppInfo {
 
   public String getApplicationType() {
     return this.applicationType;
+  }
+
+  public String getApplicationTags() {
+    return this.applicationTags;
   }
   
   public int getRunningContainers() {

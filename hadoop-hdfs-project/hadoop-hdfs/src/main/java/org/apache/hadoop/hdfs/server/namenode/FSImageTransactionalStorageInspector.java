@@ -22,6 +22,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -33,7 +34,9 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
+
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 
 class FSImageTransactionalStorageInspector extends FSImageStorageInspector {
   public static final Log LOG = LogFactory.getLog(
@@ -42,11 +45,31 @@ class FSImageTransactionalStorageInspector extends FSImageStorageInspector {
   private boolean needToSave = false;
   private boolean isUpgradeFinalized = true;
   
-  List<FSImageFile> foundImages = new ArrayList<FSImageFile>();
+  final List<FSImageFile> foundImages = new ArrayList<FSImageFile>();
   private long maxSeenTxId = 0;
   
-  private static final Pattern IMAGE_REGEX = Pattern.compile(
-    NameNodeFile.IMAGE.getName() + "_(\\d+)");
+  private final List<Pattern> namePatterns = Lists.newArrayList();
+
+  FSImageTransactionalStorageInspector() {
+    this(EnumSet.of(NameNodeFile.IMAGE));
+  }
+
+  FSImageTransactionalStorageInspector(EnumSet<NameNodeFile> nnfs) {
+    for (NameNodeFile nnf : nnfs) {
+      Pattern pattern = Pattern.compile(nnf.getName() + "_(\\d+)");
+      namePatterns.add(pattern);
+    }
+  }
+
+  private Matcher matchPattern(String name) {
+    for (Pattern p : namePatterns) {
+      Matcher m = p.matcher(name);
+      if (m.matches()) {
+        return m;
+      }
+    }
+    return null;
+  }
 
   @Override
   public void inspectDirectory(StorageDirectory sd) throws IOException {
@@ -81,11 +104,11 @@ class FSImageTransactionalStorageInspector extends FSImageStorageInspector {
       String name = f.getName();
       
       // Check for fsimage_*
-      Matcher imageMatch = IMAGE_REGEX.matcher(name);
-      if (imageMatch.matches()) {
+      Matcher imageMatch = this.matchPattern(name);
+      if (imageMatch != null) {
         if (sd.getStorageDirType().isOfType(NameNodeDirType.IMAGE)) {
           try {
-            long txid = Long.valueOf(imageMatch.group(1));
+            long txid = Long.parseLong(imageMatch.group(1));
             foundImages.add(new FSImageFile(sd, f, txid));
           } catch (NumberFormatException nfe) {
             LOG.error("Image file " + f + " has improperly formatted " +

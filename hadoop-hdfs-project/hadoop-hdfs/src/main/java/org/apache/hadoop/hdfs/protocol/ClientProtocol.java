@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.protocol;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.EnumSet;
+import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -34,8 +35,11 @@ import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.security.token.block.DataEncryptionKey;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
@@ -60,7 +64,7 @@ import org.apache.hadoop.security.token.TokenInfo;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 @KerberosInfo(
-    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY)
+    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY)
 @TokenInfo(DelegationTokenSelector.class)
 public interface ClientProtocol {
 
@@ -264,7 +268,7 @@ public interface ClientProtocol {
   /**
    * Set Owner of a path (i.e. a file or a directory).
    * The parameters username and groupname cannot both be null.
-   * @param src
+   * @param src file path
    * @param username If it is null, the original username remains unchanged.
    * @param groupname If it is null, the original groupname remains unchanged.
    *
@@ -761,6 +765,15 @@ public interface ClientProtocol {
   public void finalizeUpgrade() throws IOException;
 
   /**
+   * Rolling upgrade operations.
+   * @param action either query, start or finailze.
+   * @return rolling upgrade information.
+   */
+  @Idempotent
+  public RollingUpgradeInfo rollingUpgrade(RollingUpgradeAction action)
+      throws IOException;
+
+  /**
    * @return CorruptFileBlocks, containing a list of corrupt files (with
    *         duplicates if there is more than one corrupt block in a file)
    *         and a cookie
@@ -1113,7 +1126,6 @@ public interface ClientProtocol {
   /**
    * Modify a CacheDirective in the CacheManager.
    * 
-   * @return directive The directive to modify. Must contain a directive ID.
    * @param flags {@link CacheFlag}s to use for this operation.
    * @throws IOException if the directive could not be modified
    */
@@ -1184,4 +1196,49 @@ public interface ClientProtocol {
   @Idempotent
   public BatchedEntries<CachePoolEntry> listCachePools(String prevPool)
       throws IOException;
+
+  /**
+   * Modifies ACL entries of files and directories.  This method can add new ACL
+   * entries or modify the permissions on existing ACL entries.  All existing
+   * ACL entries that are not specified in this call are retained without
+   * changes.  (Modifications are merged into the current ACL.)
+   */
+  @Idempotent
+  public void modifyAclEntries(String src, List<AclEntry> aclSpec)
+      throws IOException;
+
+  /**
+   * Removes ACL entries from files and directories.  Other ACL entries are
+   * retained.
+   */
+  @Idempotent
+  public void removeAclEntries(String src, List<AclEntry> aclSpec)
+      throws IOException;
+
+  /**
+   * Removes all default ACL entries from files and directories.
+   */
+  @Idempotent
+  public void removeDefaultAcl(String src) throws IOException;
+
+  /**
+   * Removes all but the base ACL entries of files and directories.  The entries
+   * for user, group, and others are retained for compatibility with permission
+   * bits.
+   */
+  @Idempotent
+  public void removeAcl(String src) throws IOException;
+
+  /**
+   * Fully replaces ACL of files and directories, discarding all existing
+   * entries.
+   */
+  @Idempotent
+  public void setAcl(String src, List<AclEntry> aclSpec) throws IOException;
+
+  /**
+   * Gets the ACLs of files and directories.
+   */
+  @Idempotent
+  public AclStatus getAclStatus(String src) throws IOException;
 }

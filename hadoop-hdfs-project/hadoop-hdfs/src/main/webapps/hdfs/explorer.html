@@ -1,3 +1,5 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <!--
     Licensed to the Apache Software Foundation (ASF) under one or more
     contributor license agreements.  See the NOTICE file distributed with
@@ -14,8 +16,6 @@
     See the License for the specific language governing permissions and
     limitations under the License.
   -->
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
-	  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
   <head>
     <link rel="stylesheet" type="text/css" href="/static/bootstrap-3.0.2/css/bootstrap.min.css" />
@@ -90,7 +90,7 @@
         <tbody>
           {#FileStatus}
           <tr>
-            <td>{#helper_to_permission/}</td>
+            <td>{type|helper_to_directory}{permission|helper_to_permission}</td>
             <td>{owner}</td>
             <td>{group}</td>
             <td>{length|fmt_bytes}</td>
@@ -122,10 +122,10 @@
     </script><script type="text/javascript" src="/static/bootstrap-3.0.2/js/bootstrap.min.js">
     </script><script type="text/javascript" src="/static/dust-full-2.0.0.min.js">
     </script><script type="text/javascript" src="/static/dust-helpers-1.1.1.min.js">
-    </script><script type="text/javascript" src="dfs-dust.js">
+    </script><script type="text/javascript" src="/static/dfs-dust.js">
     </script><script type="text/javascript" src="explorer.js">
     </script>
     <hr />
-    <p><a href="http://hadoop.apache.org/core">Hadoop</a>, 2013.</p>
+    <p>Hadoop, 2014.</p>
   </body>
 </html>

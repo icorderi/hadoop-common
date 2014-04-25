@@ -32,6 +32,7 @@ import org.apache.hadoop.hdfs.qjournal.server.JournalNode;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.namenode.JournalManager;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.io.retry.Idempotent;
 import org.apache.hadoop.security.KerberosInfo;
 
 /**
@@ -42,8 +43,8 @@ import org.apache.hadoop.security.KerberosInfo;
  * recovery of the nodes.
  */
 @KerberosInfo(
-    serverPrincipal = DFSConfigKeys.DFS_JOURNALNODE_USER_NAME_KEY,
-    clientPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY)
+    serverPrincipal = DFSConfigKeys.DFS_JOURNALNODE_KERBEROS_PRINCIPAL_KEY,
+    clientPrincipal = DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY)
 @InterfaceAudience.Private
 public interface QJournalProtocol {
   public static final long versionID = 1L;
@@ -99,9 +100,10 @@ public interface QJournalProtocol {
    * using {@link #finalizeLogSegment(RequestInfo, long, long)}.
    * 
    * @param txid the first txid in the new log
+   * @param layoutVersion the LayoutVersion of the new log
    */
   public void startLogSegment(RequestInfo reqInfo,
-      long txid) throws IOException;
+      long txid, int layoutVersion) throws IOException;
 
   /**
    * Finalize the given log segment on the JournalNode. The segment
@@ -155,6 +157,14 @@ public interface QJournalProtocol {
       StorageInfo prevStorage, int targetLayoutVersion) throws IOException;
 
   public void doRollback(String journalId) throws IOException;
+
+  /**
+   * Discard journal segments whose first TxId is greater than or equal to the
+   * given txid.
+   */
+  @Idempotent
+  public void discardSegments(String journalId, long startTxId)
+      throws IOException;
 
   public Long getJournalCTime(String journalId) throws IOException;
 }
